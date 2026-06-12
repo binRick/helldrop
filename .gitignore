@@ -1,0 +1,7 @@
+Helldrop.app/
+vendor/
+logs/
+assets/freedoom1.wad
+selftest.png
+*.dSYM/
+.DS_Store
