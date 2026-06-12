@@ -89,8 +89,13 @@ change** (`statelog.h` has the writer API).
   shots like real walls. Map things spawn at the Hurt-Me-Plenty skill
   filter (0x02) — that's the tuned baseline. Doom Guy unaided should
   usually clear the map population and exit; player drops are what kill
-  him. Balance knobs live in `MOB_INFO`, the monster whiff curve in
-  `MobAttack`, and his cadence in `DgFire`.
+  him. His targeting is the **threat ledger** (`DgThreatScore`): class
+  weights (arch-vile 4x), time-to-melee for melee-only kinds, charging
+  lost souls spike, a live projectile bumps its owner, infighting pairs
+  are deprioritized ("let them work"), hysteresis prevents flicker, and
+  an engage threshold lets him walk past far stragglers. Balance knobs
+  live in `MOB_INFO`, `CLASS_W`, the monster whiff curve in `MobAttack`,
+  and his cadence in `DgFire`.
 - `src/doomgfx.c` — Doom picture-format (patch) decoder via PLAYPAL: the
   classic status bar (STBAR), mugshot faces (STFST/STFOUCH/STFEVL/STFDEAD),
   and big red digits (STTNUM). Every lump is optional with text fallbacks,
