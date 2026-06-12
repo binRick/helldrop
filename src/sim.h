@@ -112,6 +112,7 @@ typedef enum MobKind {
     MK_CACO,        // 3005: flyer, ball + bite
     MK_LOSTSOUL,    // 3006: flyer, dive-bomb charge
     MK_REVENANT,    // 66:   homing tracers — cover denial
+    MK_BARON,       // 3003: the Baron Tax — 1000hp ammo sponge
     MK_ARCHVILE,    // 64:   flame channel + raises corpses (the Corpse Bank)
     MK_COUNT
 } MobKind;
@@ -150,6 +151,7 @@ typedef enum SimSnd {
     SND_PISTOL, SND_SHOTGUN, SND_FIRSHT, SND_FIRXPL, SND_CLAW, SND_SGTATK,
     SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
     SND_SKLATK, SND_SKESIT, SND_SKEATK, SND_SKEDTH,
+    SND_BRSSIT, SND_BRSDTH,
     SND_POPAIN, SND_DMPAIN, SND_PLPAIN, SND_VIPAIN,
     SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH, SND_PLDETH,
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
@@ -180,7 +182,7 @@ typedef struct Proj {
 
 // Explosion flash for the renderer (deterministic sim data, cosmetic only).
 typedef enum BoomKind {
-    BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL, BOOM_TRACER
+    BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL, BOOM_TRACER, BOOM_BARONBALL
 } BoomKind;
 
 typedef struct Boom {
@@ -321,6 +323,7 @@ typedef struct Sim {
     long soulsSpent;
     int dropsMade;
     float startGoalDist;    // spawn->exit distance, normalizes his progress
+    long dgDamageTaken;     // total damage he has eaten (intermission stat)
     long kills;             // monsters Doom Guy has killed
     int exitLine;           // -1 if the map has no exit special
     Vector2 goal;

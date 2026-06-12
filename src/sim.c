@@ -33,15 +33,15 @@ static void Snd(struct Sim *sim, int id, Vector2 pos)
 // Per-kind voice lines: sight, pain, death, melee.
 static const int MOB_SND_SIGHT[MK_COUNT] = {
     SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
-    SND_SKLATK, SND_SKESIT, SND_VILSIT,
+    SND_SKLATK, SND_SKESIT, SND_BRSSIT, SND_VILSIT,
 };
 static const int MOB_SND_PAIN[MK_COUNT] = {
     SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN,
-    SND_DMPAIN, SND_POPAIN, SND_VIPAIN,
+    SND_DMPAIN, SND_POPAIN, SND_DMPAIN, SND_VIPAIN,
 };
 static const int MOB_SND_DEATH[MK_COUNT] = {
     SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH,
-    SND_FIRXPL, SND_SKEDTH, SND_VILDTH,
+    SND_FIRXPL, SND_SKEDTH, SND_BRSDTH, SND_VILDTH,
 };
 
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
@@ -80,6 +80,9 @@ static const MobInfo MOB_INFO[MK_COUNT] = {
                         0.0f, 0, 0,  false, 0.0f, 0,  0, true, -1, 28 },
     [MK_REVENANT]   = { "revenant",     66, 300, 20.0f, 2.0f, 100,
                         70.0f, 6, 10,  true, 10.0f, 10, 0, false, -1, 110 },
+    // The Baron Tax: drops nothing, walks slow, eats his ammo reserves.
+    [MK_BARON]      = { "baron",      3003, 1000, 24.0f, 1.4f, 50,
+                        80.0f, 10, 8,  true, 15.0f, 8,  0, false, -1, 170 },
     // The flame attack and resurrection are special-cased in MobTick.
     [MK_ARCHVILE]   = { "archvile",     64, 700, 20.0f, 3.0f,  10,
                         0.0f, 0, 0,  false, 0.0f, 0,  0, false, -1, 220 },
@@ -1555,6 +1558,7 @@ static void DamageDG(Sim *sim, int dmg, int attackerMob)
         dg->armor -= saved;
     }
     dg->health -= dmg - saved;
+    sim->dgDamageTaken += dmg - saved;
     if (dmg - saved >= 10 && dg->health > 0) Snd(sim, SND_PLPAIN, dg->pos);
     if (StateLogEnabled()) {
         StateLogBegin("dg_damage");
@@ -1794,7 +1798,8 @@ static void ProjTick(Sim *sim, Proj *p)
         RadiusBlast(sim, hitPos, 128, p->ownerMob);
     } else {
         BoomKind bk = (p->ownerKind == MK_CACO) ? BOOM_CACOBALL
-                    : (p->ownerKind == MK_REVENANT) ? BOOM_TRACER : BOOM_IMPBALL;
+                    : (p->ownerKind == MK_REVENANT) ? BOOM_TRACER
+                    : (p->ownerKind == MK_BARON) ? BOOM_BARONBALL : BOOM_IMPBALL;
         PushBoom(sim, bk, hitPos, p->z);
         Snd(sim, SND_FIRXPL, hitPos);
     }
@@ -2464,7 +2469,7 @@ static float DgThreatScore(const Sim *sim, int i, float dist, const bool *hasPro
     static const float CLASS_W[MK_COUNT] = {
         [MK_ZOMBIE] = 0.8f, [MK_SHOTGUNGUY] = 1.5f, [MK_IMP] = 1.0f,
         [MK_PINKY] = 1.0f, [MK_CACO] = 0.8f, [MK_LOSTSOUL] = 1.1f,
-        [MK_REVENANT] = 1.7f, [MK_ARCHVILE] = 4.0f,
+        [MK_REVENANT] = 1.7f, [MK_BARON] = 0.9f, [MK_ARCHVILE] = 4.0f,
     };
     const Mob *m = &sim->mobs[i];
     const MobInfo *inf = &MOB_INFO[m->kind];

@@ -295,6 +295,7 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_CACO]       = { 215,  70,  80, 255 },
     [MK_LOSTSOUL]   = { 235, 205, 130, 255 },
     [MK_REVENANT]   = { 205, 195, 175, 255 },
+    [MK_BARON]      = { 200, 140, 190, 255 },
     [MK_ARCHVILE]   = { 250, 225, 110, 255 },
 };
 
@@ -766,6 +767,62 @@ static void DrawTextShadowed(const char *text, int x, int y, int size, Color col
     DrawText(text, x, y, size, color);
 }
 
+// Vanilla episode 1 par times, the intermission's report-card yardstick.
+static int ParSeconds(const char *mapName)
+{
+    static const struct { const char *name; int par; } PARS[] = {
+        { "E1M1", 30 }, { "E1M2", 75 }, { "E1M3", 120 }, { "E1M4", 90 },
+        { "E1M5", 165 }, { "E1M6", 180 }, { "E1M7", 180 }, { "E1M8", 30 },
+        { "E1M9", 165 },
+    };
+    for (size_t i = 0; i < sizeof(PARS)/sizeof(PARS[0]); i++) {
+        if (strcmp(PARS[i].name, mapName) == 0) return PARS[i].par;
+    }
+    return 0;
+}
+
+// The intermission screen, from the demons' side of the report card.
+static void DrawIntermission(const DoomMap *map, const Sim *sim)
+{
+    bool won = (sim->dg.state == DG_DEAD);
+    int cx = GetScreenWidth()/2, cy = GetScreenHeight()/2;
+    DrawRectangle(0, cy - 130, GetScreenWidth(), 270, (Color){ 0, 0, 0, 195 });
+
+    const char *title = won ? "DOOM GUY IS DEAD - YOU WIN"
+                            : "HE REACHED THE EXIT - YOU LOSE";
+    Color tcol = won ? (Color){ 90, 255, 110, 255 } : (Color){ 255, 60, 50, 255 };
+    DrawTextShadowed(title, cx - MeasureText(title, 40)/2, cy - 116, 40, tcol);
+
+    int secs = (int)(sim->tic/SIM_TICRATE);
+    int par = ParSeconds(map->name);
+    int total = 0;
+    for (int i = 0; i < sim->mobCount; i++) {
+        total += sim->mobs[i].playerDropped ? 0 : 1;
+    }
+    int pct = (total > 0) ? (int)(sim->kills*100/total) : 0;
+    const char *lines[5];
+    lines[0] = (par > 0)
+        ? TextFormat("TIME %d:%02d   (PAR %d:%02d%s)", secs/60, secs%60,
+                     par/60, par%60,
+                     (secs > par) ? TextFormat("  +%ds over", secs - par) : "")
+        : TextFormat("TIME %d:%02d", secs/60, secs%60);
+    lines[1] = TextFormat("HIS KILLS  %ld  (%d%% of the level's demons)",
+                          sim->kills, pct);
+    lines[2] = TextFormat("HIS BLOOD  %ld damage taken", sim->dgDamageTaken);
+    lines[3] = TextFormat("YOUR HAND  %d drops   %ld souls spent",
+                          sim->dropsMade, sim->soulsSpent);
+    lines[4] = won ? "LEVEL COMPLETION: 0%   rip and torn"
+                   : "press G for the Performance Improvement Plan";
+    int y = cy - 56;
+    for (int i = 0; i < 5; i++) {
+        Color c = (i == 4) ? (Color){ 255, 200, 120, 255 } : LIGHTGRAY;
+        DrawTextShadowed(lines[i], cx - MeasureText(lines[i], 20)/2, y, 20, c);
+        y += 28;
+    }
+    const char *hint = "G restart   ESC quit";
+    DrawTextShadowed(hint, cx - MeasureText(hint, 16)/2, cy + 104, 16, GRAY);
+}
+
 static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, long turbo)
 {
     int y = 12;
@@ -808,23 +865,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
                      12, y, 14, (Color){ 230, 140, 90, 255 });
 
     if (sim->dg.state == DG_EXITED || sim->dg.state == DG_DEAD) {
-        bool won = (sim->dg.state == DG_DEAD);
-        const char *line1 = won ? "DOOM GUY IS DEAD - YOU WIN"
-                                : "HE REACHED THE EXIT - YOU LOSE";
-        const char *line2 = "press G to restart";
-        const char *line3 = TextFormat("time %.0fs   his kills %ld   "
-                                       "your drops %d   souls spent %ld",
-                                       (double)sim->tic/SIM_TICRATE, sim->kills,
-                                       sim->dropsMade, sim->soulsSpent);
-        Color col = won ? (Color){ 90, 255, 110, 255 } : (Color){ 255, 60, 50, 255 };
-        int w1 = MeasureText(line1, 40);
-        int w2 = MeasureText(line2, 20);
-        int w3 = MeasureText(line3, 18);
-        int cx = GetScreenWidth()/2, cy = GetScreenHeight()/2;
-        DrawRectangle(0, cy - 56, GetScreenWidth(), 124, (Color){ 0, 0, 0, 170 });
-        DrawTextShadowed(line1, cx - w1/2, cy - 40, 40, col);
-        DrawTextShadowed(line2, cx - w2/2, cy + 6, 20, RAYWHITE);
-        DrawTextShadowed(line3, cx - w3/2, cy + 36, 18, LIGHTGRAY);
+        DrawIntermission(map, sim);
     } else if (sim->dg.state == DG_NO_GOAL) {
         const char *line1 = "NO ROUTE TO EXIT";
         int w1 = MeasureText(line1, 28);
@@ -1105,7 +1146,8 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_FIVE))  selectedKind = MK_CACO;
         if (IsKeyPressed(KEY_SIX))   selectedKind = MK_LOSTSOUL;
         if (IsKeyPressed(KEY_SEVEN)) selectedKind = MK_REVENANT;
-        if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_ARCHVILE;
+        if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_BARON;
+        if (IsKeyPressed(KEY_NINE))  selectedKind = MK_ARCHVILE;
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);
@@ -1194,7 +1236,7 @@ int main(int argc, char **argv)
                 // Odd waves bring an arch-vile to bank the previous wave's
                 // corpses — the smoke test for resurrection.
                 static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_CACO, MK_LOSTSOUL };
-                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_ZOMBIE, MK_IMP, MK_PINKY };
+                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_BARON, MK_IMP, MK_PINKY };
                 const MobKind *wave = ((sim.tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
                 float a = sim.dg.angleDeg*DEG2RAD;
                 for (int w = 0; w < 4; w++) {
@@ -1284,7 +1326,7 @@ int main(int argc, char **argv)
         if (frame % 12 == 0) LogSnapshot(&vs, &sim);
         frame++;
 
-        if (opt.selftest && frame >= 60) {
+        if (opt.selftest && frame >= ((opt.exitAfter > 0) ? opt.exitAfter : 60)) {
             TakeScreenshot("selftest.png");
             if (StateLogEnabled()) {
                 StateLogBegin("selftest_done");
@@ -1293,7 +1335,7 @@ int main(int argc, char **argv)
             }
             break;
         }
-        if (opt.exitAfter > 0 && frame >= opt.exitAfter) break;
+        if (!opt.selftest && opt.exitAfter > 0 && frame >= opt.exitAfter) break;
     }
 
     LogShutdown(frame, sim.tic);

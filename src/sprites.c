@@ -24,6 +24,7 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
     [MK_CACO]       = { "HEAD", "A",      "BCD", 'E', "FGHIJK", NULL },
     [MK_LOSTSOUL]   = { "SKUL", "AB",     "CD",  'E', "FGHIJK", NULL },
     [MK_REVENANT]   = { "SKEL", "ABCDEF", "JK",  'L', "LMNOPQ", NULL },
+    [MK_BARON]      = { "BOSS", "ABCD",   "EFG", 'H', "IJKLMNO", NULL },
     [MK_ARCHVILE]   = { "VILE", "ABCDEF", "GHIJKLMNOP", 'Q', "RSTUVWXYZ", "[\\]" },
 };
 
@@ -101,6 +102,7 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal);
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
+    SpriteSetLoad(&gs->baronBall, wad, "BAL7", pal);
     SpriteSetLoad(&gs->tracer, wad, "FATB", pal);
     SpriteSetLoad(&gs->tracerBoom, wad, "FBXP", pal);
     SpriteSetLoad(&gs->missile, wad, "MISL", pal);
@@ -123,6 +125,7 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->player);
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
+    SpriteSetUnload(&gs->baronBall);
     SpriteSetUnload(&gs->tracer);
     SpriteSetUnload(&gs->tracerBoom);
     SpriteSetUnload(&gs->missile);
@@ -213,7 +216,8 @@ const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long ti
     }
     const SpriteSet *set = (p->ownerKind == MK_CACO) ? &gs->ball[1]
                          : (p->ownerKind == MK_REVENANT) ? &gs->tracer
-                                                         : &gs->ball[0];
+                         : (p->ownerKind == MK_BARON) ? &gs->baronBall
+                                                      : &gs->ball[0];
     if (!set->any) return NULL;
     if (set->frames[1].present) return Pick(set, (tic/4) % 2 ? 'B' : 'A');
     return Pick(set, 'A');
@@ -228,6 +232,7 @@ const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long ag
     if (kind == BOOM_ROCKET) { set = &gs->missile; seq = "BCD"; }
     else if (kind == BOOM_CACOBALL) { set = &gs->ball[1]; seq = "CDE"; }
     else if (kind == BOOM_TRACER) { set = &gs->tracerBoom; seq = "ABC"; }
+    else if (kind == BOOM_BARONBALL) { set = &gs->baronBall; seq = "CDE"; }
     else { set = &gs->ball[0]; seq = "CDE"; }
     if (!set->any) return NULL;
     int i = (int)(age/4);
