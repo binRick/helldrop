@@ -27,10 +27,12 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
 
 static const MobAnim PLAYER_ANIM = { "PLAY", "ABCD", "EF", 'G', "HIJKLMN", NULL };
 
-static const char *PICKUP_LUMPS[8] = {
+static const char *PICKUP_LUMPS[PK_COUNT] = {
     [PK_STIM] = "STIM", [PK_MEDIKIT] = "MEDI", [PK_ARMOR] = "ARM1",
     [PK_SHOTGUN] = "SHOT", [PK_CLIP] = "CLIP", [PK_CLIPBOX] = "AMMO",
     [PK_SHELLS] = "SHEL", [PK_SHELLBOX] = "SBOX",
+    [PK_CHAINGUN] = "MGUN", [PK_RLAUNCH] = "LAUN",
+    [PK_ROCKET] = "ROCK", [PK_ROCKETBOX] = "BROK",
 };
 
 static const char *ALPHA_TEST_FS =
@@ -97,8 +99,9 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal);
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
+    SpriteSetLoad(&gs->missile, wad, "MISL", pal);
     SpriteSetLoad(&gs->fire, wad, "FIRE", pal);
-    for (int p = 0; p < 8; p++) {
+    for (int p = 0; p < PK_COUNT; p++) {
         SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal);
     }
 
@@ -115,8 +118,9 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->player);
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
+    SpriteSetUnload(&gs->missile);
     SpriteSetUnload(&gs->fire);
-    for (int p = 0; p < 8; p++) SpriteSetUnload(&gs->pickups[p]);
+    for (int p = 0; p < PK_COUNT; p++) SpriteSetUnload(&gs->pickups[p]);
     if (gs->alphaTest.id != 0) UnloadShader(gs->alphaTest);
     memset(gs, 0, sizeof(*gs));
 }
@@ -185,7 +189,7 @@ const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long 
 
 const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long tic)
 {
-    if (t < 0 || t >= 8 || !gs->pickups[t].any) return NULL;
+    if (t < 0 || t >= PK_COUNT || !gs->pickups[t].any) return NULL;
     // Armor bonuses blink A/B in vanilla; everything else sits on A.
     if (t == PK_ARMOR && gs->pickups[t].frames[1].present) {
         return Pick(&gs->pickups[t], (tic/16) % 2 ? 'B' : 'A');
@@ -193,12 +197,30 @@ const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long t
     return Pick(&gs->pickups[t], 'A');
 }
 
-const SpriteFrame *BallSpriteFrame(const GameSprites *gs, MobKind owner, long tic)
+const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long tic)
 {
-    const SpriteSet *set = (owner == MK_CACO) ? &gs->ball[1] : &gs->ball[0];
+    if (p->isRocket) {
+        if (!gs->missile.any) return NULL;
+        return Pick(&gs->missile, 'A');
+    }
+    const SpriteSet *set = (p->ownerKind == MK_CACO) ? &gs->ball[1] : &gs->ball[0];
     if (!set->any) return NULL;
     if (set->frames[1].present) return Pick(set, (tic/4) % 2 ? 'B' : 'A');
     return Pick(set, 'A');
+}
+
+// Explosions: MISL B-D for rockets, BAL* C-E for fireballs, ~4 tics each.
+const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long age)
+{
+    const SpriteSet *set;
+    const char *seq;
+    if (kind == BOOM_ROCKET) { set = &gs->missile; seq = "BCD"; }
+    else if (kind == BOOM_CACOBALL) { set = &gs->ball[1]; seq = "CDE"; }
+    else { set = &gs->ball[0]; seq = "CDE"; }
+    if (!set->any) return NULL;
+    int i = (int)(age/4);
+    if (i < 0 || i > 2) return NULL;
+    return Pick(set, seq[i]);
 }
 
 const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic)

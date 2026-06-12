@@ -732,6 +732,17 @@ static float MoveEntity(Sim *sim, Vector2 *pos, float z, float radius,
 
 // ---------------------------------------------------------------- doom guy
 
+const char *DGWeaponName(DGWeapon w)
+{
+    switch (w) {
+    case WPN_PISTOL:   return "pistol";
+    case WPN_SHOTGUN:  return "shotgun";
+    case WPN_CHAINGUN: return "chaingun";
+    case WPN_ROCKET:   return "rockets";
+    }
+    return "?";
+}
+
 const char *DGStateName(DGState s)
 {
     switch (s) {
@@ -1154,7 +1165,8 @@ static void FireHitscan(Sim *sim, int shooterMob, Vector2 from, float zFrom,
 }
 
 static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
-                            Vector2 at, float zAt, float speed, int damageMult)
+                            Vector2 at, float zAt, float speed, int damageMult,
+                            bool isRocket)
 {
     for (int i = 0; i < PROJS_MAX; i++) {
         Proj *p = &sim->projs[i];
@@ -1163,7 +1175,8 @@ static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
         if (dist < 1.0f) dist = 1.0f;
         Vector2 dir = { (at.x - from.x)/dist, (at.y - from.y)/dist };
         p->alive = true;
-        p->pos = p->prevPos = (Vector2){ from.x + dir.x*16.0f, from.y + dir.y*16.0f };
+        p->isRocket = isRocket;
+        p->pos = p->prevPos = (Vector2){ from.x + dir.x*20.0f, from.y + dir.y*20.0f };
         p->vel = (Vector2){ dir.x*speed, dir.y*speed };
         p->z = p->prevZ = zFrom;
         p->zVel = (zAt - zFrom) / (dist/speed);
@@ -1171,6 +1184,47 @@ static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
         p->ownerMob = ownerMob;
         p->ownerKind = (ownerMob >= 0) ? sim->mobs[ownerMob].kind : MK_COUNT;
         return;
+    }
+}
+
+static void PushBoom(Sim *sim, BoomKind kind, Vector2 pos, float z)
+{
+    sim->booms[sim->boomHead % BOOMS_MAX] =
+        (Boom){ (unsigned char)kind, pos, z, sim->tic };
+    sim->boomHead++;
+}
+
+// Vanilla P_RadiusAttack flavor: linear falloff from the blast center,
+// hurts everything including Doom Guy himself — and gibs corpses, which
+// is THE counterplay against arch-vile corpse banking.
+static void RadiusBlast(Sim *sim, Vector2 pos, int maxDmg, int attackerMob)
+{
+    for (int i = 0; i < sim->mobCount; i++) {
+        Mob *m = &sim->mobs[i];
+        float d = Dist2D(pos, m->pos) - MOB_INFO[m->kind].radius;
+        if (d < 0.0f) d = 0.0f;
+        if (m->state == MOB_DEAD) {
+            if (!m->gibbed && d < 100.0f) {
+                m->gibbed = true;
+                Snd(sim, SND_SLOP, m->pos);
+                if (StateLogEnabled()) {
+                    StateLogBegin("corpse_gibbed");
+                    StateLogInt("tic", sim->tic);
+                    StateLogStr("kind", MobKindName(m->kind));
+                    StateLogFloat("x", m->pos.x);
+                    StateLogFloat("y", m->pos.y);
+                    StateLogEnd();
+                }
+            }
+            continue;
+        }
+        if (d >= (float)maxDmg) continue;
+        DamageMob(sim, i, maxDmg - (int)d, attackerMob);
+    }
+    if (sim->dg.state != DG_DEAD && sim->dg.state != DG_EXITED) {
+        float d = Dist2D(pos, sim->dg.pos) - DG_RADIUS;
+        if (d < 0.0f) d = 0.0f;
+        if (d < (float)maxDmg) DamageDG(sim, maxDmg - (int)d, attackerMob);
     }
 }
 
@@ -1191,24 +1245,41 @@ static void ProjTick(Sim *sim, Proj *p)
         float t = SegCircleT(p->pos, next, m->pos, MOB_INFO[m->kind].radius + 6.0f);
         if (t < tBest) { tBest = t; hitMob = i; }
     }
-    if (sim->dg.state != DG_DEAD && sim->dg.state != DG_EXITED) {
+    // His own rockets fly through him (vanilla); only the blast hurts him.
+    if (!(p->isRocket && p->ownerMob < 0) &&
+        sim->dg.state != DG_DEAD && sim->dg.state != DG_EXITED) {
         float t = SegCircleT(p->pos, next, sim->dg.pos, DG_RADIUS + 6.0f);
         if (t < tBest) { tBest = t; hitMob = -1; hitDG = true; }
     }
 
-    if (tBest < 1.0f) {
-        int dmg = (SimRandom(sim)%8 + 1) * p->damageMult;
-        if (hitDG) DamageDG(sim, dmg, p->ownerMob);
-        else if (hitMob >= 0) DamageMob(sim, hitMob, dmg, p->ownerMob);
-        Snd(sim, SND_FIRXPL, p->pos);
-        p->alive = false;
-        return;
+    bool exploded = (tBest < 1.0f);
+    Vector2 hitPos = { p->pos.x + (next.x - p->pos.x)*tBest,
+                       p->pos.y + (next.y - p->pos.y)*tBest };
+    if (!exploded) {
+        p->pos = next;
+        p->z = nextZ;
+        bool onMap = false;
+        float floorH = SimFloorAtPoint(sim, p->pos.x, p->pos.y, &onMap);
+        if (!onMap || p->z < floorH + 2.0f) {   // ground/void hit
+            exploded = true;
+            hitPos = p->pos;
+        }
     }
-    p->pos = next;
-    p->z = nextZ;
-    bool onMap = false;
-    float floorH = SimFloorAtPoint(sim, p->pos.x, p->pos.y, &onMap);
-    if (!onMap || p->z < floorH + 2.0f) p->alive = false;   // ground/void hit
+    if (!exploded) return;
+
+    int dmg = (SimRandom(sim)%8 + 1) * p->damageMult;
+    if (hitDG) DamageDG(sim, dmg, p->ownerMob);
+    else if (hitMob >= 0) DamageMob(sim, hitMob, dmg, p->ownerMob);
+    if (p->isRocket) {
+        PushBoom(sim, BOOM_ROCKET, hitPos, p->z);
+        Snd(sim, SND_BAREXP, hitPos);
+        RadiusBlast(sim, hitPos, 128, p->ownerMob);
+    } else {
+        PushBoom(sim, (p->ownerKind == MK_CACO) ? BOOM_CACOBALL : BOOM_IMPBALL,
+                 hitPos, p->z);
+        Snd(sim, SND_FIRXPL, hitPos);
+    }
+    p->alive = false;
 }
 
 // ---------------------------------------------------------------- pickups
@@ -1269,13 +1340,36 @@ static void TouchPickups(Sim *sim)
             if (dg->shells >= 50) took = false;
             else { dg->shells += 20; what = "shell_box"; }
             break;
+        case PK_CHAINGUN:
+            dg->hasChaingun = true;
+            dg->bullets += p->dropped ? 10 : 20;
+            what = "chaingun";
+            break;
+        case PK_RLAUNCH:
+            dg->hasRocketLauncher = true;
+            dg->rockets += 2;
+            what = "rocket_launcher";
+            break;
+        case PK_ROCKET:
+            if (dg->rockets >= 50) took = false;
+            else { dg->rockets += 1; what = "rocket"; }
+            break;
+        case PK_ROCKETBOX:
+            if (dg->rockets >= 50) took = false;
+            else { dg->rockets += 5; what = "rocket_box"; }
+            break;
+        default:
+            took = false;
+            break;
         }
         if (!took) continue;
         if (dg->health > 100) dg->health = 100;
         if (dg->bullets > 200) dg->bullets = 200;
         if (dg->shells > 50) dg->shells = 50;
+        if (dg->rockets > 50) dg->rockets = 50;
         p->alive = false;
-        Snd(sim, (p->type == PK_SHOTGUN) ? SND_WPNUP : SND_ITEMUP, dg->pos);
+        Snd(sim, (p->type == PK_SHOTGUN || p->type == PK_CHAINGUN ||
+                  p->type == PK_RLAUNCH) ? SND_WPNUP : SND_ITEMUP, dg->pos);
         if (StateLogEnabled()) {
             StateLogBegin("pickup");
             StateLogInt("tic", sim->tic);
@@ -1292,6 +1386,12 @@ static void TouchPickups(Sim *sim)
                 dg->objective = OBJ_EXIT;
                 DgSetState(sim, DG_ADVANCE, "healed");
                 PlanCurrentObjective(sim, "healed");
+            }
+        }
+        if (i == dg->weaponPickup) {
+            dg->weaponPickup = -1;
+            if (dg->state == DG_ADVANCE) {
+                PlanCurrentObjective(sim, "got_weapon");   // next rung or exit
             }
         }
     }
@@ -1383,7 +1483,7 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
     } else if (inf->hasMissile) {
         Snd(sim, SND_FIRSHT, m->pos);
         SpawnProjectile(sim, idx, m->pos, m->z + 32.0f, tpos, tz + 24.0f,
-                        inf->missileSpeed, inf->missileMult);
+                        inf->missileSpeed, inf->missileMult, false);
     }
 }
 
@@ -1595,6 +1695,56 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
     return true;
 }
 
+// Existence-only A* over the triangle graph: is `to` reachable from `from`?
+// Used to refuse pickup detours into one-way drops (pits whose way back
+// out is a lift we don't simulate yet).
+static bool RouteExists(Sim *sim, Vector2 from, Vector2 to)
+{
+    int startNode = TriAtPoint(sim, from.x, from.y);
+    int goalNode = TriAtPoint(sim, to.x, to.y);
+    if (startNode < 0 || goalNode < 0 || sim->triCount <= 0) return false;
+    if (startNode == goalNode) return true;
+    ANode *n = (ANode *)calloc((size_t)sim->triCount, sizeof(ANode));
+    if (!n) return false;
+    n[startNode] = (ANode){ 0.0f, from, -1, -1, 1 };
+    bool found = false;
+    for (;;) {
+        int cur = -1;
+        float bestF = FLT_MAX;
+        for (int s = 0; s < sim->triCount; s++) {
+            if (n[s].state != 1) continue;
+            float f = n[s].g + Dist2D(n[s].entry, to);
+            if (f < bestF) { bestF = f; cur = s; }
+        }
+        if (cur < 0) break;
+        if (cur == goalNode) { found = true; break; }
+        n[cur].state = 2;
+        for (int e = sim->tEdgeStart[cur]; e < sim->tEdgeStart[cur + 1]; e++) {
+            const NavEdge *E = &sim->tEdges[e];
+            float ng = n[cur].g + Dist2D(n[cur].entry, E->wp);
+            if (n[E->to].state == 0 || ng < n[E->to].g - 0.01f) {
+                n[E->to].g = ng;
+                n[E->to].entry = E->wp;
+                n[E->to].parentNode = cur;
+                n[E->to].parentEdge = e;
+                n[E->to].state = 1;
+            }
+        }
+    }
+    free(n);
+    return found;
+}
+
+static const char *ObjectiveName(DGObjective o)
+{
+    switch (o) {
+    case OBJ_EXIT:   return "exit";
+    case OBJ_HEAL:   return "heal";
+    case OBJ_WEAPON: return "weapon";
+    }
+    return "?";
+}
+
 static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
 {
     DoomGuy *dg = &sim->dg;
@@ -1628,11 +1778,19 @@ static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
     }
     if (ok) PruneRoute(sim);
 
+    if (!ok) {
+        TraceLog(LOG_WARNING,
+                 "SIM: plan failed: from (%.0f,%.0f) tri %d sector %d -> "
+                 "goal (%.0f,%.0f) tri %d sector %d",
+                 dg->pos.x, dg->pos.y, TriAtPoint(sim, dg->pos.x, dg->pos.y),
+                 dg->sector, goalPos.x, goalPos.y,
+                 TriAtPoint(sim, goalPos.x, goalPos.y), goalSector);
+    }
     if (StateLogEnabled()) {
         StateLogBegin("doomguy_replan");
         StateLogInt("tic", sim->tic);
         StateLogStr("reason", reason);
-        StateLogStr("objective", (sim->dg.objective == OBJ_HEAL) ? "heal" : "exit");
+        StateLogStr("objective", ObjectiveName(sim->dg.objective));
         StateLogBool("ok", ok);
         StateLogStr("method", method);
         StateLogInt("waypoints", dg->wpCount);
@@ -1641,8 +1799,29 @@ static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
     return ok;
 }
 
-// Route to the current objective; a failed heal route falls back to the
-// exit, a failed exit route is fatal (NO_GOAL).
+// Nearest weapon pickup he doesn't own yet — the next rung of the ladder.
+static int NearestWantedWeapon(const Sim *sim)
+{
+    const DoomGuy *dg = &sim->dg;
+    int best = -1;
+    float bestD = FLT_MAX;
+    for (int i = 0; i < sim->pickupCount; i++) {
+        const Pickup *p = &sim->pickups[i];
+        if (!p->alive || p->unreachable) continue;
+        bool wanted = (p->type == PK_SHOTGUN && !dg->hasShotgun) ||
+                      (p->type == PK_CHAINGUN && !dg->hasChaingun) ||
+                      (p->type == PK_RLAUNCH && !dg->hasRocketLauncher);
+        if (!wanted) continue;
+        float d = Dist2D(dg->pos, p->pos);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+// Route to the current objective. Priority: an active heal run, then the
+// arsenal ladder (he routes for un-owned weapons like a speedrunner — his
+// power-ups ARE the difficulty curve), then the exit. Only a failed exit
+// route is fatal (NO_GOAL).
 static bool PlanCurrentObjective(Sim *sim, const char *reason)
 {
     DoomGuy *dg = &sim->dg;
@@ -1654,6 +1833,21 @@ static bool PlanCurrentObjective(Sim *sim, const char *reason)
         dg->objective = OBJ_EXIT;
         dg->healPickup = -1;
     }
+    for (;;) {
+        int w = NearestWantedWeapon(sim);
+        if (w < 0) break;
+        dg->objective = OBJ_WEAPON;
+        // No detours into one-way drops: he must be able to leave with it.
+        bool returnable = (sim->goalSector < 0) ||
+                          RouteExists(sim, sim->pickups[w].pos, sim->goal);
+        if (returnable && PlanPathTo(sim, sim->pickups[w].pos, reason)) {
+            dg->weaponPickup = w;
+            return true;
+        }
+        sim->pickups[w].unreachable = true;
+    }
+    dg->objective = OBJ_EXIT;
+    dg->weaponPickup = -1;
     if (sim->goalSector >= 0 && PlanPathTo(sim, sim->goal, reason)) return true;
     DgSetState(sim, DG_NO_GOAL, reason);
     return false;
@@ -1694,7 +1888,8 @@ static float DgFacingErr(const DoomGuy *dg, Vector2 to)
     return err;
 }
 
-// Nearest live monster he can see from eye height, or -1.
+// Nearest live monster he can see from eye height, or -1. Arch-viles get
+// a steep distance discount: every Doom player kills the vile first.
 static int DgPickTarget(Sim *sim)
 {
     DoomGuy *dg = &sim->dg;
@@ -1704,6 +1899,7 @@ static int DgPickTarget(Sim *sim)
         Mob *m = &sim->mobs[i];
         if (m->state == MOB_DEAD) continue;
         float d = Dist2D(dg->pos, m->pos);
+        if (m->kind == MK_ARCHVILE) d *= 0.35f;
         if (d >= bestD) continue;
         if (!SightClearZ(sim, dg->pos, dg->z + DG_EYE, m->pos, m->z + 24.0f)) continue;
         bestD = d;
@@ -1712,11 +1908,28 @@ static int DgPickTarget(Sim *sim)
     return best;
 }
 
+// The arsenal ladder is the difficulty curve: each pickup changes which of
+// your monsters still matter. Rocket discipline is deliberate counterplay —
+// anything hugging him (pinkies!) switches his best weapon off.
+static DGWeapon DgChooseWeapon(const DoomGuy *dg, const Mob *target, float dist)
+{
+    bool bigTarget = target && (MOB_INFO[target->kind].health >= 60);
+    if (dg->hasRocketLauncher && dg->rockets > 0 && dist > 180.0f &&
+        (bigTarget || dist > 500.0f)) {
+        return WPN_ROCKET;
+    }
+    if (dg->hasShotgun && dg->shells > 0 && dist < 260.0f) return WPN_SHOTGUN;
+    if (dg->hasChaingun && dg->bullets > 0) return WPN_CHAINGUN;
+    if (dg->hasShotgun && dg->shells > 0) return WPN_SHOTGUN;
+    return WPN_PISTOL;
+}
+
 static void DgFire(Sim *sim)
 {
     DoomGuy *dg = &sim->dg;
     Mob *t = &sim->mobs[dg->targetMob];
-    if (dg->weapon == WPN_SHOTGUN) {
+    switch (dg->weapon) {
+    case WPN_SHOTGUN:
         dg->shells--;
         Snd(sim, SND_SHOTGUN, dg->pos);
         for (int p = 0; p < 7; p++) {
@@ -1725,13 +1938,32 @@ static void DgFire(Sim *sim)
                         6.0f, dmg);
         }
         dg->fireCooldown = 37;                       // vanilla shotgun cadence
-    } else {
+        break;
+    case WPN_CHAINGUN: {
+        dg->bullets--;
+        Snd(sim, SND_PISTOL, dg->pos);               // vanilla chaingun voice
+        int dmg = (SimRandom(sim)%3 + 1) * 5;
+        FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
+                    4.0f, dmg);
+        dg->fireCooldown = 4;                        // sustained fire
+        break;
+    }
+    case WPN_ROCKET:
+        dg->rockets--;
+        Snd(sim, SND_RLAUNC, dg->pos);
+        SpawnProjectile(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
+                        20.0f, 20, true);            // vanilla speed and dice
+        dg->fireCooldown = 30;
+        break;
+    default: {
         dg->bullets--;
         Snd(sim, SND_PISTOL, dg->pos);
         int dmg = (SimRandom(sim)%3 + 1) * 5;
         FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
                     2.5f, dmg);
         dg->fireCooldown = 10;                       // vanilla pistol cadence
+        break;
+    }
     }
     WakeNearby(sim, dg->pos, dg->z + DG_EYE, 800.0f);   // gunfire carries
 }
@@ -1779,15 +2011,23 @@ static void DgFollowRoute(Sim *sim)
     DgUpdateGround(sim);
 
     bool last = (dg->wpCursor == dg->wpCount - 1);
-    // Heal runs must end ON the pickup (touch radius 32), not merely near it,
-    // or arrival flips the objective while the kit is still on the floor.
-    float arrive = last ? ((dg->objective == OBJ_HEAL) ? 12.0f : DG_USERANGE*0.75f)
+    // Pickup runs must end ON the item (touch radius 32), not merely near
+    // it, or arrival flips the objective while it's still on the floor.
+    float arrive = last ? ((dg->objective != OBJ_EXIT) ? 12.0f : DG_USERANGE*0.75f)
                         : WP_ARRIVE;
     if (Dist2D(dg->pos, target) < arrive) {
         if (last) {
             if (dg->objective == OBJ_EXIT) {
                 if (sim->exitLine >= 0) DgTriggerExit(sim);
                 else DgSetState(sim, DG_NO_GOAL, "no_exit_line");
+            } else if (dg->objective == OBJ_WEAPON) {
+                // Arrived but never touched it (a ledge perch, say): write
+                // it off so the ladder can't loop on it forever.
+                if (dg->weaponPickup >= 0 && sim->pickups[dg->weaponPickup].alive) {
+                    sim->pickups[dg->weaponPickup].unreachable = true;
+                }
+                dg->weaponPickup = -1;
+                PlanCurrentObjective(sim, "weapon_gone");
             } else {
                 // Heal spot reached; TouchPickups normally flips us back
                 // earlier, so the pickup must be gone. Move on.
@@ -1820,21 +2060,25 @@ static void DgFightTick(Sim *sim)
 
     DgFace(dg, tpos, 35.0f);   // combat reflexes turn faster than travel
 
-    // Weapon choice: shotgun when fed, else pistol.
-    DGWeapon want = (dg->hasShotgun && dg->shells > 0) ? WPN_SHOTGUN : WPN_PISTOL;
+    DGWeapon want = DgChooseWeapon(dg, t, dist);
     if (want != dg->weapon) {
         dg->weapon = want;
         dg->fireCooldown = (dg->fireCooldown < 10) ? 10 : dg->fireCooldown;
         if (StateLogEnabled()) {
             StateLogBegin("weapon_switch");
             StateLogInt("tic", sim->tic);
-            StateLogStr("weapon", (want == WPN_SHOTGUN) ? "shotgun" : "pistol");
+            StateLogStr("weapon", DGWeaponName(want));
             StateLogEnd();
         }
     }
 
     if (dg->fireCooldown > 0) dg->fireCooldown--;
-    bool hasAmmo = (dg->weapon == WPN_SHOTGUN) ? dg->shells > 0 : dg->bullets > 0;
+    bool hasAmmo = true;
+    switch (dg->weapon) {
+    case WPN_SHOTGUN:  hasAmmo = dg->shells > 0; break;
+    case WPN_ROCKET:   hasAmmo = dg->rockets > 0; break;
+    default:           hasAmmo = dg->bullets > 0; break;
+    }
     if (dg->fireCooldown <= 0 && hasAmmo && fabsf(DgFacingErr(dg, tpos)) < 8.0f &&
         SightClearZ(sim, dg->pos, dg->z + DG_EYE, tpos, t->z + 24.0f)) {
         DgFire(sim);
@@ -1842,7 +2086,8 @@ static void DgFightTick(Sim *sim)
 
     // Never stand still: orbit the target at preferred range, back off from
     // melee chasers, flip orbit direction when a wall interrupts it.
-    float wantRange = (dg->weapon == WPN_SHOTGUN) ? 220.0f : 300.0f;
+    float wantRange = (dg->weapon == WPN_SHOTGUN) ? 220.0f
+                    : (dg->weapon == WPN_ROCKET)  ? 420.0f : 300.0f;
     bool meleeThreat = (MOB_INFO[t->kind].meleeRange > 0.0f &&
                         !MOB_INFO[t->kind].hasMissile && MOB_INFO[t->kind].pellets == 0);
     if (meleeThreat) wantRange = 240.0f;
@@ -1896,11 +2141,24 @@ static void DgTick(Sim *sim)
         }
     }
 
+    // NO_GOAL heartbeat: the world changes (doors, drops); retry every ~5s
+    // instead of standing down forever.
+    if (dg->state == DG_NO_GOAL) {
+        if (sim->tic % 175 == 0 && sim->goalSector >= 0) {
+            dg->objective = OBJ_EXIT;
+            if (PlanCurrentObjective(sim, "no_goal_retry")) {
+                DgSetState(sim, DG_ADVANCE, "route_found");
+            }
+        }
+        return;
+    }
+
     // Low health: break off for the nearest health kit, if any exists.
     if (dg->health < DG_LOW_HP && dg->objective != OBJ_HEAL &&
         dg->state != DG_RETREAT) {
         int heal = NearestHealPickup(sim, dg->pos);
-        if (heal >= 0) {
+        if (heal >= 0 &&
+            RouteExists(sim, sim->pickups[heal].pos, sim->goal)) {
             dg->objective = OBJ_HEAL;
             dg->healPickup = heal;
             if (PlanPathTo(sim, sim->pickups[heal].pos, "low_health")) {
@@ -2007,10 +2265,14 @@ static bool SpawnDoomGuy(Sim *sim)
         dg->armor = 0;
         dg->bullets = 50;                    // vanilla pistol start
         dg->shells = 0;
+        dg->rockets = 0;
         dg->hasShotgun = false;
+        dg->hasChaingun = false;
+        dg->hasRocketLauncher = false;
         dg->weapon = WPN_PISTOL;
         dg->targetMob = -1;
         dg->healPickup = -1;
+        dg->weaponPickup = -1;
         dg->strafeDir = 1.0f;
         dg->objective = OBJ_EXIT;
         dg->sector = SimSectorAtPoint(sim, dg->pos.x, dg->pos.y);
@@ -2173,6 +2435,8 @@ static void SpawnMapThings(Sim *sim)
         { 2011, PK_STIM }, { 2012, PK_MEDIKIT }, { 2018, PK_ARMOR },
         { 2001, PK_SHOTGUN }, { 2007, PK_CLIP }, { 2048, PK_CLIPBOX },
         { 2008, PK_SHELLS }, { 2049, PK_SHELLBOX },
+        { 2002, PK_CHAINGUN }, { 2003, PK_RLAUNCH },
+        { 2010, PK_ROCKET }, { 2046, PK_ROCKETBOX },
     };
     const DoomMap *map = sim->map;
     int mobs = 0, pickups = 0;

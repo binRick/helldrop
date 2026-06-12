@@ -42,8 +42,8 @@ typedef enum DGState {
     DG_NO_GOAL,     // no start, no exit, or no route
 } DGState;
 
-typedef enum DGObjective { OBJ_EXIT, OBJ_HEAL } DGObjective;
-typedef enum DGWeapon { WPN_PISTOL, WPN_SHOTGUN } DGWeapon;
+typedef enum DGObjective { OBJ_EXIT, OBJ_HEAL, OBJ_WEAPON } DGObjective;
+typedef enum DGWeapon { WPN_PISTOL, WPN_SHOTGUN, WPN_CHAINGUN, WPN_ROCKET } DGWeapon;
 
 typedef enum DoorState { DOOR_CLOSED, DOOR_OPENING, DOOR_OPEN, DOOR_CLOSING } DoorState;
 
@@ -107,6 +107,7 @@ typedef enum SimSnd {
     SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH, SND_PLDETH,
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
     SND_VILATK, SND_FLAMST, SND_SLOP,
+    SND_RLAUNC, SND_BAREXP,
     SND_COUNT
 } SimSnd;
 
@@ -119,22 +120,37 @@ typedef struct SndEvent {
 
 typedef struct Proj {
     bool alive;
+    bool isRocket;          // his rocket: direct (1d8)*20 + 128 radius blast
     Vector2 pos, prevPos;
     Vector2 vel;            // per tic
     float z, prevZ, zVel;
     int damageMult;         // damage = (1d8) * damageMult, vanilla missiles
-    int ownerMob;           // -1 = Doom Guy (unused for now: he is hitscan)
+    int ownerMob;           // -1 = Doom Guy
     MobKind ownerKind;
 } Proj;
 
+// Explosion flash for the renderer (deterministic sim data, cosmetic only).
+typedef enum BoomKind { BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL } BoomKind;
+
+typedef struct Boom {
+    unsigned char kind;
+    Vector2 pos;
+    float z;
+    long tic;
+} Boom;
+
+#define BOOMS_MAX 32
+
 typedef enum PickupType {
     PK_STIM, PK_MEDIKIT, PK_ARMOR, PK_SHOTGUN, PK_CLIP, PK_CLIPBOX,
-    PK_SHELLS, PK_SHELLBOX,
+    PK_SHELLS, PK_SHELLBOX, PK_CHAINGUN, PK_RLAUNCH, PK_ROCKET, PK_ROCKETBOX,
+    PK_COUNT
 } PickupType;
 
 typedef struct Pickup {
     bool alive;
     bool dropped;           // monster drops give half amounts, vanilla rule
+    bool unreachable;       // routing to it failed once; stop trying
     PickupType type;
     Vector2 pos;
     float z;
@@ -171,8 +187,8 @@ typedef struct DoomGuy {
     DGObjective objective;
     int sector;             // last known containing sector, -1 unknown
     int health, armor;
-    int bullets, shells;
-    bool hasShotgun;
+    int bullets, shells, rockets;
+    bool hasShotgun, hasChaingun, hasRocketLauncher;
     DGWeapon weapon;
     int fireCooldown;
     long deathTic;          // when he died; drives the death animation
@@ -181,6 +197,7 @@ typedef struct DoomGuy {
     int noTargetTics;
     int threatScanTics;
     int healPickup;         // pickup index RETREAT is heading for, -1
+    int weaponPickup;       // pickup index OBJ_WEAPON is heading for, -1
     Vector2 *wp;            // route waypoints (crossing midpoints + goal)
     float *wpFloor;         // floor height of the sector each wp enters
     int *wpDoor;            // door index the waypoint passes through, -1
@@ -230,6 +247,8 @@ typedef struct Sim {
     int pickupCount;
     Tracer tracers[TRACERS_MAX];
     int tracerHead;
+    Boom booms[BOOMS_MAX];
+    int boomHead;
     SndEvent sndEvents[SND_EVENTS_MAX];
     long sndHead;
     PendingDrop pending[PENDING_MAX];
@@ -263,6 +282,7 @@ int SimDropCost(Sim *sim, MobKind kind, float x, float y, bool *hot);
 int SimDropBaseCost(MobKind kind);
 float SimSoulRate(const Sim *sim);   // current drip per second
 const char *DGStateName(DGState s);
+const char *DGWeaponName(DGWeapon w);
 const char *MobKindName(MobKind k);
 const char *MobStateName(MobState s);
 float MobRadius(MobKind k);

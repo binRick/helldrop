@@ -356,16 +356,39 @@ static void DrawProjectiles(const Sim *sim, float alpha, const GameSprites *gs,
         float x = p->prevPos.x + (p->pos.x - p->prevPos.x)*alpha;
         float y = p->prevPos.y + (p->pos.y - p->prevPos.y)*alpha;
         float z = p->prevZ + (p->z - p->prevZ)*alpha;
-        const SpriteFrame *f = gs->valid ? BallSpriteFrame(gs, p->ownerKind, sim->tic)
-                                         : NULL;
+        const SpriteFrame *f = gs->valid ? ProjSpriteFrame(gs, p, sim->tic) : NULL;
         if (f) {
             // Balls anchor centered, not feet-planted: drop the base by half.
             float h = (float)f->tex[0].height;
             DrawSpriteBillboard(cam, f, 0, (Vector3){ x, z - h*0.5f, -y }, WHITE);
         } else {
-            Color c = (p->ownerKind == MK_CACO) ? (Color){ 255, 60, 60, 255 }
+            Color c = p->isRocket ? (Color){ 220, 220, 220, 255 }
+                    : (p->ownerKind == MK_CACO) ? (Color){ 255, 60, 60, 255 }
                                                 : (Color){ 255, 140, 40, 255 };
             DrawSphere((Vector3){ x, z, -y }, 7.0f, c);
+        }
+    }
+}
+
+static void DrawBooms(const Sim *sim, const GameSprites *gs, Camera3D cam)
+{
+    for (int i = 0; i < BOOMS_MAX; i++) {
+        const Boom *b = &sim->booms[i];
+        long age = sim->tic - b->tic;
+        if (b->tic == 0 || age < 0 || age > 11) continue;
+        const SpriteFrame *f = gs->valid
+                                   ? BoomSpriteFrame(gs, (BoomKind)b->kind, age)
+                                   : NULL;
+        if (f) {
+            float h = (float)f->tex[0].height;
+            DrawSpriteBillboard(cam, f, 0,
+                                (Vector3){ b->pos.x, b->z - h*0.5f, -b->pos.y },
+                                WHITE);
+        } else {
+            float r = 20.0f + (float)age*6.0f;
+            unsigned char a = (unsigned char)(220 - age*18);
+            DrawSphereWires((Vector3){ b->pos.x, b->z, -b->pos.y }, r, 8, 8,
+                            (Color){ 255, 170, 60, a });
         }
     }
 }
@@ -516,13 +539,15 @@ static void LogSnapshot(const ViewState *vs, const Sim *sim)
     StateLogFloat("z", sim->dg.z);
     StateLogFloat("angle", sim->dg.angleDeg);
     StateLogStr("state", DGStateName(sim->dg.state));
-    StateLogStr("objective", (sim->dg.objective == OBJ_HEAL) ? "heal" : "exit");
+    StateLogStr("objective", (sim->dg.objective == OBJ_HEAL) ? "heal"
+                : (sim->dg.objective == OBJ_WEAPON) ? "weapon" : "exit");
     StateLogInt("sector", sim->dg.sector);
     StateLogInt("health", sim->dg.health);
     StateLogInt("armor", sim->dg.armor);
     StateLogInt("bullets", sim->dg.bullets);
     StateLogInt("shells", sim->dg.shells);
-    StateLogStr("weapon", (sim->dg.weapon == WPN_SHOTGUN) ? "shotgun" : "pistol");
+    StateLogInt("rockets", sim->dg.rockets);
+    StateLogStr("weapon", DGWeaponName(sim->dg.weapon));
     StateLogInt("target", sim->dg.targetMob);
     StateLogInt("wp_cursor", sim->dg.wpCursor);
     StateLogInt("wp_count", sim->dg.wpCount);
@@ -702,9 +727,10 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
     for (int i = 0; i < sim->mobCount; i++) {
         if (sim->mobs[i].state != MOB_DEAD) alive++;
     }
-    DrawTextShadowed(TextFormat("%s  bullets %d  shells %d  |  kills %ld  monsters %d",
-                                (sim->dg.weapon == WPN_SHOTGUN) ? "SHOTGUN" : "PISTOL",
-                                sim->dg.bullets, sim->dg.shells, sim->kills, alive),
+    DrawTextShadowed(TextFormat("%s  bullets %d  shells %d  rockets %d  |  kills %ld  monsters %d",
+                                DGWeaponName(sim->dg.weapon),
+                                sim->dg.bullets, sim->dg.shells, sim->dg.rockets,
+                                sim->kills, alive),
                      12, y, 16, (Color){ 255, 220, 130, 255 });
 
     y += 20;
@@ -863,7 +889,8 @@ static void DrawStatusBar(const DoomHud *hud, const Sim *sim, const FaceState *f
                       0.0f, (float)scale, WHITE);
     }
 
-    int ammo = (dg->weapon == WPN_SHOTGUN) ? dg->shells : dg->bullets;
+    int ammo = (dg->weapon == WPN_SHOTGUN) ? dg->shells
+             : (dg->weapon == WPN_ROCKET)  ? dg->rockets : dg->bullets;
     int numY = y0 + 3*scale;
     if (hud->hasDigits) {
         DrawBigNum(hud, ammo, x0 + 44*scale, numY, scale);
@@ -1072,6 +1099,7 @@ int main(int argc, char **argv)
         DrawPickups(&sim, &gsprites, cam);
         DrawMobs(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
         DrawProjectiles(&sim, simAlpha, &gsprites, cam);
+        DrawBooms(&sim, &gsprites, cam);
         DrawDoomGuy(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
         // Arch-vile flame burns on the victim for the whole channel.
         for (int i = 0; i < sim.mobCount; i++) {
