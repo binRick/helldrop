@@ -60,7 +60,15 @@ change** (`statelog.h` has the writer API).
   adjacent crossings never hit walls; sector-level portal routing fails
   inside concave sectors and is kept only as fallback), with line-of-sight
   waypoint pruning and a uniform-grid line blockmap for circle-vs-wall
-  sliding collision. Combat: `MOB_INFO` bestiary table (zombieman,
+  sliding collision. Nav is **self-healing**: edges he gets stuck against
+  are banned for the run (tEdgeBlocked) and he replans around them.
+  **Movers & triggers**: doors (DR/D1 + tagged remote), lifts/plats
+  (down-wait-up), one-shot floor lowers, floor raises ("risers"), and
+  teleports, driven by the vanilla W/S trigger system (`ActionForSpecial`).
+  He plays triggers like a speedrunner: crossing fires walkovers, and he
+  presses any switch within reach every few tics. Floor heights are live
+  everywhere (`SimSectorFloorNow`); lift-sector floors render at their LOW
+  height in the static mesh with a dynamic cap drawn on top. Combat: `MOB_INFO` bestiary table (zombieman,
   shotgunguy, imp, pinky, caco — vanilla-ish dice), monster AI
   (IDLE/CHASE/ATTACK/PAIN/DEAD, sight+sound wake, blocked-path wiggle),
   hitscan with tracers, projectiles, the vanilla **infighting** retarget

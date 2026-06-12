@@ -431,6 +431,43 @@ static void DrawPickups(const Sim *sim, const GameSprites *gs, Camera3D cam)
     }
 }
 
+// Lift platforms: the static mesh holds lift floors at their LOW position;
+// draw the moving cap (the lift sector's own floor triangles, shifted up)
+// plus dark side skirts along its boundary.
+static void DrawLifts(const Sim *sim, const LevelMesh *lm, float alpha)
+{
+    const DoomMap *map = sim->map;
+    for (int i = 0; i < sim->liftCount; i++) {
+        const Lift *l = &sim->lifts[i];
+        float floor = l->prevFloor + (l->floor - l->prevFloor)*alpha;
+        if (floor - l->lowFloor < 0.5f) continue;   // resting on the slab
+        const float *v = lm->floors.vertices;
+        Color cap = { 130, 124, 112, 255 };
+        for (int t = 0; t < lm->floors.triangleCount; t++) {
+            if (lm->floorTriSector[t] != l->sector) continue;
+            const float *a = &v[(size_t)t*9], *b = a + 3, *c = a + 6;
+            DrawTriangle3D((Vector3){ a[0], floor, a[2] },
+                           (Vector3){ b[0], floor, b[2] },
+                           (Vector3){ c[0], floor, c[2] }, cap);
+        }
+        Color skirt = { 78, 74, 66, 255 };
+        for (int j = 0; j < map->lineCount; j++) {
+            const Linedef *ld = &map->lines[j];
+            if (ld->sideFront < 0 || ld->sideBack < 0) continue;
+            int fs = map->sides[ld->sideFront].sector;
+            int bs = map->sides[ld->sideBack].sector;
+            if (fs != l->sector && bs != l->sector) continue;
+            Vector2 a = map->verts[ld->v1], b = map->verts[ld->v2];
+            Vector3 a0 = { a.x, l->lowFloor, -a.y }, b0 = { b.x, l->lowFloor, -b.y };
+            Vector3 a1 = { a.x, floor, -a.y },       b1 = { b.x, floor, -b.y };
+            DrawTriangle3D(a0, b0, b1, skirt);
+            DrawTriangle3D(a0, b1, a1, skirt);
+            DrawTriangle3D(a0, b1, b0, skirt);
+            DrawTriangle3D(a0, a1, b1, skirt);
+        }
+    }
+}
+
 // Door panels are the only moving geometry; the static level mesh knows
 // nothing about them, so draw the visible slab (current ceiling up to the
 // fully-open height) over every two-sided line bordering a door sector.
@@ -592,6 +629,16 @@ static void LogSnapshot(const ViewState *vs, const Sim *sim)
         StateLogInt("sector", sim->doors[i].sector);
         StateLogStr("state", DoorStateName(sim->doors[i].state));
         StateLogFloat("ceil", sim->doors[i].ceil);
+        StateLogObjEnd();
+    }
+    StateLogArrEnd();
+    StateLogArrBegin("lifts");
+    for (int i = 0; i < sim->liftCount; i++) {
+        static const char *LIFT_STATES[] = { "up", "down", "low", "rising" };
+        StateLogObjBegin(NULL);
+        StateLogInt("sector", sim->lifts[i].sector);
+        StateLogStr("state", LIFT_STATES[sim->lifts[i].state]);
+        StateLogFloat("floor", sim->lifts[i].floor);
         StateLogObjEnd();
     }
     StateLogArrEnd();
@@ -1090,6 +1137,7 @@ int main(int argc, char **argv)
         ClearBackground((Color){ 12, 12, 14, 255 });
         BeginMode3D(cam);
         LevelMeshDraw(&lm);
+        DrawLifts(&sim, &lm, simAlpha);
         DrawDoors(&sim, simAlpha);
         DrawThings(&map, thingHeights);
         DrawRoute(&sim, simAlpha);

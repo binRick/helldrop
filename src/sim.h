@@ -35,6 +35,7 @@
 typedef enum DGState {
     DG_ADVANCE,     // following the route toward the current objective
     DG_WAIT_DOOR,   // used a door, standing until it opens enough
+    DG_WAIT_LIFT,   // called a lift, standing until it reaches him
     DG_FIGHT,       // engaging a visible monster
     DG_RETREAT,     // low health: routing to a known health pickup
     DG_EXITED,      // flipped the exit switch: the player has lost
@@ -46,6 +47,21 @@ typedef enum DGObjective { OBJ_EXIT, OBJ_HEAL, OBJ_WEAPON } DGObjective;
 typedef enum DGWeapon { WPN_PISTOL, WPN_SHOTGUN, WPN_CHAINGUN, WPN_ROCKET } DGWeapon;
 
 typedef enum DoorState { DOOR_CLOSED, DOOR_OPENING, DOOR_OPEN, DOOR_CLOSING } DoorState;
+
+// Vanilla plats: the floor lowers to the lowest neighbor, waits, raises.
+typedef enum LiftState { LIFT_UP, LIFT_DOWN, LIFT_LOW, LIFT_RISING } LiftState;
+
+typedef struct Lift {
+    int sector;
+    float floor, prevFloor;   // live floor height (prev for render lerp)
+    float lowFloor;           // lowest neighbor floor
+    float highFloor;          // the sector's original floor
+    float speed;              // 4/tic vanilla, 8 blaze
+    LiftState state;
+    int timer;                // tics left waiting at the bottom
+    bool stayLow;             // one-shot floor-lower barriers never rise
+    bool riser;               // floor-raise targets: start low, rise once
+} Lift;
 
 typedef struct Door {
     int sector;
@@ -108,6 +124,7 @@ typedef enum SimSnd {
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
     SND_VILATK, SND_FLAMST, SND_SLOP,
     SND_RLAUNC, SND_BAREXP,
+    SND_PSTART, SND_PSTOP,
     SND_COUNT
 } SimSnd;
 
@@ -201,8 +218,12 @@ typedef struct DoomGuy {
     Vector2 *wp;            // route waypoints (crossing midpoints + goal)
     float *wpFloor;         // floor height of the sector each wp enters
     int *wpDoor;            // door index the waypoint passes through, -1
+    int *wpLift;            // lift index the waypoint rides, -1
+    int *wpEdge;            // tri-nav edge per waypoint (-1 = none/goal)
     int wpCount, wpCursor;
+    int stuckStrikes;       // consecutive stuck-replans; escalates recovery
     int waitDoor;           // door index while DG_WAIT_DOOR, else -1
+    int waitLift;           // lift index while DG_WAIT_LIFT, else -1
     int stuckTics;
     int replans;
 } DoomGuy;
@@ -211,6 +232,7 @@ typedef struct NavEdge {
     int to;        // destination node (triangle or sector)
     int line;      // portal linedef, -1 intra-sector
     int door;      // door that must be open to pass, -1
+    int lift;      // lift that must be down/level to pass, -1
     Vector2 wp;    // crossing midpoint
 } NavEdge;
 
@@ -225,6 +247,7 @@ typedef struct Sim {
     int *tEdgeStart;        // triCount+1 prefix offsets
     int tEdgeCount;
     int triCount;
+    unsigned char *tEdgeBlocked;   // self-healing nav: edges he got stuck on
     // Fallback nav: directional sector adjacency via portal midpoints
     NavEdge *edges;
     int *edgeStart;         // sectorCount+1 prefix offsets
@@ -239,6 +262,10 @@ typedef struct Sim {
     Door *doors;
     int doorCount;
     int *sectorDoor;        // door index per sector, -1
+    Lift *lifts;
+    int liftCount;
+    int *sectorLift;        // lift index per sector, -1
+    unsigned char *lineUsed; // one-shot (W1/S1) trigger lines already fired
     DoomGuy dg;
     Mob mobs[MOBS_MAX];
     int mobCount;           // compact prefix; corpses stay in the array
@@ -271,6 +298,7 @@ void SimTick(Sim *sim);
 int  SimRandom(Sim *sim);                                  // 0..255
 int  SimSectorAtPoint(const Sim *sim, float x, float y);   // -1 outside
 float SimFloorAtPoint(const Sim *sim, float x, float y, bool *ok);
+float SimSectorFloorNow(const Sim *sim, int sector);   // live (lift-aware)
 // Dev/free spawn (used by --autodrop); ignores the economy entirely.
 bool SimDrop(Sim *sim, MobKind kind, float x, float y);
 // Player verb: pay souls and drop a monster. Out of his sight: instant.

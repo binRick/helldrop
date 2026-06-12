@@ -24,6 +24,7 @@ static const char *SND_LUMPS[SND_COUNT] = {
     [SND_VILATK] = "DSVILATK", [SND_FLAMST] = "DSFLAMST",
     [SND_SLOP] = "DSSLOP",
     [SND_RLAUNC] = "DSRLAUNC", [SND_BAREXP] = "DSBAREXP",
+    [SND_PSTART] = "DSPSTART", [SND_PSTOP] = "DSPSTOP",
 };
 
 static bool DmxToSound(const Wad *wad, const char *name, Sound *out)

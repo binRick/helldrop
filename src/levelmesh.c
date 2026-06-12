@@ -156,6 +156,35 @@ static bool EmitSectorFloor(GeoBuf *g, IntBuf *tri2sec, int sectorIdx,
     return true;
 }
 
+// Lift sectors render their floor at the LOW position: the sim draws the
+// moving platform cap on top, so the static slab must never float above it.
+// (Detection mirrors sim.c's BuildLifts: tagged sectors of plat specials.)
+static float FloorRenderHeight(const DoomMap *map, int s)
+{
+    static const int PLATS[] = { 10, 21, 62, 88, 120, 121, 122, 123 };
+    const Sector *sec = &map->sectors[s];
+    if (sec->tag <= 0) return sec->floorH;
+    bool isLift = false;
+    for (int i = 0; i < map->lineCount && !isLift; i++) {
+        if (map->lines[i].tag != sec->tag) continue;
+        for (size_t k = 0; k < sizeof(PLATS)/sizeof(PLATS[0]); k++) {
+            if (map->lines[i].special == PLATS[k]) { isLift = true; break; }
+        }
+    }
+    if (!isLift) return sec->floorH;
+    float lowest = sec->floorH;
+    for (int i = 0; i < map->lineCount; i++) {
+        const Linedef *l = &map->lines[i];
+        if (l->sideFront < 0 || l->sideBack < 0) continue;
+        int fs = map->sides[l->sideFront].sector;
+        int bs = map->sides[l->sideBack].sector;
+        int other = (fs == s) ? bs : ((bs == s) ? fs : -1);
+        if (other < 0 || other == s) continue;
+        if (map->sectors[other].floorH < lowest) lowest = map->sectors[other].floorH;
+    }
+    return lowest;
+}
+
 static bool BuildFloors(GeoBuf *g, IntBuf *tri2sec, const DoomMap *map)
 {
     int S = map->sectorCount;
@@ -262,7 +291,8 @@ static bool BuildFloors(GeoBuf *g, IntBuf *tri2sec, const DoomMap *map)
         }
         if (ok && contours > 0) {
             if (tessTesselate(tess, TESS_WINDING_POSITIVE, TESS_POLYGONS, 3, 2, NULL)) {
-                ok = EmitSectorFloor(g, tri2sec, s, tess, sec->floorH, col);
+                ok = EmitSectorFloor(g, tri2sec, s, tess,
+                                     FloorRenderHeight(map, s), col);
             } else {
                 TraceLog(LOG_WARNING,
                          "LEVELMESH: sector %d: floor tessellation failed, skipped", s);

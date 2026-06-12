@@ -197,11 +197,18 @@ int SimSectorAtPoint(const Sim *sim, float x, float y)
     return (t >= 0) ? sim->lm->floorTriSector[t] : -1;
 }
 
+float SimSectorFloorNow(const Sim *sim, int sector)
+{
+    if (sector < 0) return 0.0f;
+    int li = sim->sectorLift ? sim->sectorLift[sector] : -1;
+    return (li >= 0) ? sim->lifts[li].floor : sim->map->sectors[sector].floorH;
+}
+
 float SimFloorAtPoint(const Sim *sim, float x, float y, bool *ok)
 {
     int s = SimSectorAtPoint(sim, x, y);
     if (ok) *ok = (s >= 0);
-    return (s >= 0) ? sim->map->sectors[s].floorH : 0.0f;
+    return (s >= 0) ? SimSectorFloorNow(sim, s) : 0.0f;
 }
 
 // Triangle corner in Doom coords (mesh stores world (x, h, -y)).
@@ -392,13 +399,27 @@ static float PotentialCeil(const Sim *sim, int sector)
     return (di >= 0) ? sim->doors[di].openCeil : sim->map->sectors[sector].ceilH;
 }
 
+// Potential floors for routing: a lift counts at its LOW height when being
+// stepped onto (it can come down for you) and at its HIGH height when being
+// left (it carries you up).
+static float PotentialFloorLow(const Sim *sim, int sector)
+{
+    int li = sim->sectorLift[sector];
+    return (li >= 0) ? sim->lifts[li].lowFloor : sim->map->sectors[sector].floorH;
+}
+
+static float PotentialFloorHigh(const Sim *sim, int sector)
+{
+    int li = sim->sectorLift[sector];
+    return (li >= 0) ? sim->lifts[li].highFloor : sim->map->sectors[sector].floorH;
+}
+
 static bool EdgePassable(const Sim *sim, int from, int to, const Linedef *l)
 {
-    const Sector *a = &sim->map->sectors[from];
-    const Sector *b = &sim->map->sectors[to];
-    if (b->floorH - a->floorH > DG_STEP) return false;   // climb limit; drops ok
+    if (PotentialFloorLow(sim, to) - PotentialFloorHigh(sim, from) > DG_STEP)
+        return false;                                    // climb limit; drops ok
     float top = fminf(PotentialCeil(sim, from), PotentialCeil(sim, to));
-    float bottom = fmaxf(a->floorH, b->floorH);
+    float bottom = fmaxf(PotentialFloorLow(sim, from), PotentialFloorLow(sim, to));
     if (top - bottom < DG_HEIGHT) return false;
     if (l->flags & ML_BLOCKING) return false;
     return true;
@@ -429,7 +450,6 @@ static bool BuildNav(Sim *sim)
             int bs = map->sides[l->sideBack].sector;
             if (fs < 0 || bs < 0 || fs == bs) continue;
             Vector2 v1 = map->verts[l->v1], v2 = map->verts[l->v2];
-            if (Dist2D(v1, v2) < 2.0f*DG_RADIUS) continue;   // too narrow
             Vector2 mid = { (v1.x + v2.x)*0.5f, (v1.y + v2.y)*0.5f };
             const int dirs[2][2] = { { fs, bs }, { bs, fs } };
             for (int k = 0; k < 2; k++) {
@@ -440,14 +460,428 @@ static bool BuildNav(Sim *sim)
                 } else {
                     int door = (sim->sectorDoor[to] >= 0) ? sim->sectorDoor[to]
                                                           : sim->sectorDoor[from];
-                    sim->edges[fill[from]++] =
-                        (NavEdge){ .to = to, .line = i, .door = door, .wp = mid };
+                    int lift = (sim->sectorLift[to] >= 0) ? sim->sectorLift[to]
+                                                          : sim->sectorLift[from];
+                    sim->edges[fill[from]++] = (NavEdge){
+                        .to = to, .line = i, .door = door, .lift = lift, .wp = mid };
                 }
             }
         }
         if (pass == 1) free(fill);
     }
     return true;
+}
+
+// ---------------------------------------------------------------- lifts
+
+#define LIFT_WAIT_TICS 105    // vanilla PLATWAIT (3s)
+
+static const struct { int special; float speed; } LIFT_SPECIALS[] = {
+    { 10, 4.0f }, { 21, 4.0f }, { 62, 4.0f }, { 88, 4.0f },   // vanilla plats
+    { 120, 8.0f }, { 121, 8.0f }, { 122, 8.0f }, { 123, 8.0f }, // blaze
+};
+
+static int LiftSpecialIndex(int special)
+{
+    for (size_t i = 0; i < sizeof(LIFT_SPECIALS)/sizeof(LIFT_SPECIALS[0]); i++) {
+        if (LIFT_SPECIALS[i].special == special) return (int)i;
+    }
+    return -1;
+}
+
+static Vector2 SectorAnyPoint(const Sim *sim, int sector)
+{
+    for (int i = 0; i < sim->map->lineCount; i++) {
+        const Linedef *l = &sim->map->lines[i];
+        int fs = (l->sideFront >= 0) ? sim->map->sides[l->sideFront].sector : -1;
+        int bs = (l->sideBack >= 0) ? sim->map->sides[l->sideBack].sector : -1;
+        if (fs == sector || bs == sector) {
+            Vector2 a = sim->map->verts[l->v1], b = sim->map->verts[l->v2];
+            return (Vector2){ (a.x + b.x)*0.5f, (a.y + b.y)*0.5f };
+        }
+    }
+    return sim->dg.pos;
+}
+
+// Lift sectors are the TAGGED sectors of plat linedef specials (unlike
+// doors, which act on the line's back sector).
+static bool BuildLifts(Sim *sim)
+{
+    const DoomMap *map = sim->map;
+    sim->sectorLift = (int *)malloc((size_t)map->sectorCount * sizeof(int));
+    if (!sim->sectorLift) return false;
+    for (int s = 0; s < map->sectorCount; s++) sim->sectorLift[s] = -1;
+    sim->lifts = (Lift *)calloc((size_t)map->sectorCount, sizeof(Lift));
+    if (!sim->lifts) return false;
+    sim->liftCount = 0;
+
+    for (int i = 0; i < map->lineCount; i++) {
+        const Linedef *l = &map->lines[i];
+        int spec = LiftSpecialIndex(l->special);
+        if (spec < 0 || l->tag <= 0) continue;
+        for (int s = 0; s < map->sectorCount; s++) {
+            if (map->sectors[s].tag != l->tag || sim->sectorLift[s] >= 0) continue;
+            float lowest = FLT_MAX;
+            for (int j = 0; j < map->lineCount; j++) {
+                const Linedef *n = &map->lines[j];
+                if (n->sideFront < 0 || n->sideBack < 0) continue;
+                int fs = map->sides[n->sideFront].sector;
+                int bs = map->sides[n->sideBack].sector;
+                int other = (fs == s) ? bs : ((bs == s) ? fs : -1);
+                if (other < 0 || other == s) continue;
+                float f = map->sectors[other].floorH;
+                if (f < lowest) lowest = f;
+            }
+            if (lowest == FLT_MAX || lowest >= map->sectors[s].floorH) continue;
+            Lift *lf = &sim->lifts[sim->liftCount];
+            lf->sector = s;
+            lf->floor = lf->prevFloor = lf->highFloor = map->sectors[s].floorH;
+            lf->lowFloor = lowest;
+            lf->speed = LIFT_SPECIALS[spec].speed;
+            lf->state = LIFT_UP;
+            sim->sectorLift[s] = sim->liftCount;
+            sim->liftCount++;
+        }
+    }
+    return true;
+}
+
+static void LiftActivate(Sim *sim, int li)
+{
+    Lift *l = &sim->lifts[li];
+    if (l->riser) {
+        if (l->state != LIFT_LOW) return;
+        l->state = LIFT_RISING;
+        Snd(sim, SND_PSTART, SectorAnyPoint(sim, l->sector));
+        if (StateLogEnabled()) {
+            StateLogBegin("lift");
+            StateLogInt("tic", sim->tic);
+            StateLogInt("sector", l->sector);
+            StateLogStr("action", "raise");
+            StateLogEnd();
+        }
+        return;
+    }
+    if (l->state != LIFT_UP) return;
+    l->state = LIFT_DOWN;
+    Snd(sim, SND_PSTART, SectorAnyPoint(sim, l->sector));
+    if (StateLogEnabled()) {
+        StateLogBegin("lift");
+        StateLogInt("tic", sim->tic);
+        StateLogInt("sector", l->sector);
+        StateLogStr("action", "down");
+        StateLogEnd();
+    }
+}
+
+static void LiftTick(Sim *sim, int li)
+{
+    Lift *l = &sim->lifts[li];
+    l->prevFloor = l->floor;
+    switch (l->state) {
+    case LIFT_DOWN:
+        l->floor -= l->speed;
+        if (l->floor <= l->lowFloor) {
+            l->floor = l->lowFloor;
+            l->state = LIFT_LOW;
+            l->timer = LIFT_WAIT_TICS;
+            Snd(sim, SND_PSTOP, SectorAnyPoint(sim, l->sector));
+        }
+        break;
+    case LIFT_LOW:
+        if (l->stayLow) break;   // one-shot floor-lower barriers rest here
+        if (--l->timer <= 0) {
+            l->state = LIFT_RISING;
+            Snd(sim, SND_PSTART, SectorAnyPoint(sim, l->sector));
+        }
+        break;
+    case LIFT_RISING:
+        l->floor += l->speed;
+        if (l->floor >= l->highFloor) {
+            l->floor = l->highFloor;
+            l->state = LIFT_UP;
+            Snd(sim, SND_PSTOP, SectorAnyPoint(sim, l->sector));
+        }
+        break;
+    case LIFT_UP:
+        break;
+    }
+}
+
+// Any plat trigger line for this lift within use range of the point?
+static bool LiftTriggerInRange(const Sim *sim, int li, Vector2 from)
+{
+    int tag = sim->map->sectors[sim->lifts[li].sector].tag;
+    for (int i = 0; i < sim->map->lineCount; i++) {
+        const Linedef *l = &sim->map->lines[i];
+        if (l->tag != tag || LiftSpecialIndex(l->special) < 0) continue;
+        Vector2 q = SegClosest(sim->map->verts[l->v1], sim->map->verts[l->v2], from);
+        if (Dist2D(q, from) <= DG_USERANGE) return true;
+    }
+    return false;
+}
+
+// ------------------------------------------------------------ line actions
+//
+// The vanilla trigger system, reduced to what progression needs: tagged
+// doors, plats, one-shot floor-lower barriers, teleports, and exits, fired
+// by walking over (W) or using (S) the line. Doom Guy plays it like a
+// speedrunner: he triggers every walkover he crosses and presses every
+// switch he passes.
+
+typedef enum ActKind {
+    ACT_NONE, ACT_DOOR_OPEN, ACT_DOOR_OWC, ACT_DOOR_CLOSE,
+    ACT_PLAT, ACT_FLOOR_LOWER, ACT_FLOOR_RAISE, ACT_TELEPORT, ACT_EXIT
+} ActKind;
+
+typedef struct LineAction {
+    ActKind kind;
+    bool use;       // S-type: pressed
+    bool walk;      // W-type: crossed
+    bool repeat;    // SR/WR
+} LineAction;
+
+static LineAction ActionForSpecial(int sp)
+{
+    switch (sp) {
+    // tagged doors
+    case 2:   return (LineAction){ ACT_DOOR_OPEN,  false, true,  false };
+    case 3:   return (LineAction){ ACT_DOOR_CLOSE, false, true,  false };
+    case 4:   return (LineAction){ ACT_DOOR_OWC,   false, true,  false };
+    case 29:  return (LineAction){ ACT_DOOR_OWC,   true,  false, false };
+    case 42:  return (LineAction){ ACT_DOOR_CLOSE, true,  false, true };
+    case 50:  return (LineAction){ ACT_DOOR_CLOSE, true,  false, false };
+    case 61:  return (LineAction){ ACT_DOOR_OPEN,  true,  false, true };
+    case 63:  return (LineAction){ ACT_DOOR_OWC,   true,  false, true };
+    case 86:  return (LineAction){ ACT_DOOR_OPEN,  false, true,  true };
+    case 90:  return (LineAction){ ACT_DOOR_OWC,   false, true,  true };
+    case 103: return (LineAction){ ACT_DOOR_OPEN,  true,  false, false };
+    case 105: return (LineAction){ ACT_DOOR_OWC,   false, true,  true };
+    case 106: return (LineAction){ ACT_DOOR_OPEN,  false, true,  true };
+    case 108: return (LineAction){ ACT_DOOR_OWC,   false, true,  false };
+    case 109: return (LineAction){ ACT_DOOR_OPEN,  false, true,  false };
+    case 111: return (LineAction){ ACT_DOOR_OWC,   true,  false, false };
+    case 112: return (LineAction){ ACT_DOOR_OWC,   true,  false, false };
+    case 113: return (LineAction){ ACT_DOOR_OPEN,  true,  false, false };
+    case 114: return (LineAction){ ACT_DOOR_OWC,   true,  false, true };
+    case 115: return (LineAction){ ACT_DOOR_OPEN,  true,  false, true };
+    // plats (already lift sectors; these fire them remotely)
+    case 10: case 121: return (LineAction){ ACT_PLAT, false, true,  false };
+    case 88: case 120: return (LineAction){ ACT_PLAT, false, true,  true };
+    case 21: case 122: return (LineAction){ ACT_PLAT, true,  false, false };
+    case 62: case 123: return (LineAction){ ACT_PLAT, true,  false, true };
+    // one-shot floor lowers (barriers)
+    case 23: case 36: return (LineAction){ ACT_FLOOR_LOWER, true,  false, false };
+    case 38: case 19: return (LineAction){ ACT_FLOOR_LOWER, false, true,  false };
+    case 60: case 70: return (LineAction){ ACT_FLOOR_LOWER, true,  false, true };
+    case 82: case 83: case 98: return (LineAction){ ACT_FLOOR_LOWER, false, true, true };
+    // floor raises (steps/bridges that come up to meet you)
+    case 18: case 20: case 64: case 101:
+        return (LineAction){ ACT_FLOOR_RAISE, true,  false, false };
+    case 69: case 91: return (LineAction){ ACT_FLOOR_RAISE, true,  false, true };
+    case 5: case 119: return (LineAction){ ACT_FLOOR_RAISE, false, true,  false };
+    case 128:         return (LineAction){ ACT_FLOOR_RAISE, false, true,  true };
+    // teleports
+    case 39: return (LineAction){ ACT_TELEPORT, false, true, false };
+    case 97: return (LineAction){ ACT_TELEPORT, false, true, true };
+    // exits
+    case 11: case 51:  return (LineAction){ ACT_EXIT, true,  false, false };
+    case 52: case 124: return (LineAction){ ACT_EXIT, false, true,  false };
+    default: return (LineAction){ ACT_NONE, false, false, false };
+    }
+}
+
+static void DgTriggerExit(Sim *sim);
+static bool SegsCross(Vector2 a, Vector2 b, Vector2 c, Vector2 d);
+
+// Sectors targeted by tagged door/floor actions get Door/Lift state
+// machines too, so nav potentials and live blocking treat them like their
+// manually-operated cousins.
+static void BuildTaggedActions(Sim *sim)
+{
+    const DoomMap *map = sim->map;
+    for (int i = 0; i < map->lineCount; i++) {
+        const Linedef *l = &map->lines[i];
+        if (l->tag <= 0) continue;
+        LineAction act = ActionForSpecial(l->special);
+        bool isDoor = (act.kind == ACT_DOOR_OPEN || act.kind == ACT_DOOR_OWC ||
+                       act.kind == ACT_DOOR_CLOSE);
+        bool isFloor = (act.kind == ACT_FLOOR_LOWER);
+        bool isRaise = (act.kind == ACT_FLOOR_RAISE);
+        if (!isDoor && !isFloor && !isRaise) continue;
+        for (int s = 0; s < map->sectorCount; s++) {
+            if (map->sectors[s].tag != l->tag) continue;
+            if (isDoor && sim->sectorDoor[s] < 0) {
+                float minC = FLT_MAX;
+                for (int j = 0; j < map->lineCount; j++) {
+                    const Linedef *n = &map->lines[j];
+                    if (n->sideFront < 0 || n->sideBack < 0) continue;
+                    int fs = map->sides[n->sideFront].sector;
+                    int bs = map->sides[n->sideBack].sector;
+                    int other = (fs == s) ? bs : ((bs == s) ? fs : -1);
+                    if (other < 0 || other == s) continue;
+                    if (map->sectors[other].ceilH < minC) minC = map->sectors[other].ceilH;
+                }
+                if (minC == FLT_MAX) continue;
+                Door *d = &sim->doors[sim->doorCount];
+                memset(d, 0, sizeof(*d));
+                d->sector = s;
+                d->ceil = d->prevCeil = map->sectors[s].ceilH;
+                d->openCeil = minC - 4.0f;
+                d->speed = 2.0f;
+                if (d->openCeil <= map->sectors[s].floorH) continue;
+                if (d->ceil - map->sectors[s].floorH >= DG_HEIGHT) {
+                    d->state = DOOR_OPEN;
+                    d->stayOpen = true;
+                    d->timer = -1;
+                } else {
+                    d->state = DOOR_CLOSED;
+                }
+                sim->sectorDoor[s] = sim->doorCount++;
+            } else if (isFloor && sim->sectorLift[s] < 0) {
+                float lowest = FLT_MAX;
+                for (int j = 0; j < map->lineCount; j++) {
+                    const Linedef *n = &map->lines[j];
+                    if (n->sideFront < 0 || n->sideBack < 0) continue;
+                    int fs = map->sides[n->sideFront].sector;
+                    int bs = map->sides[n->sideBack].sector;
+                    int other = (fs == s) ? bs : ((bs == s) ? fs : -1);
+                    if (other < 0 || other == s) continue;
+                    if (map->sectors[other].floorH < lowest) lowest = map->sectors[other].floorH;
+                }
+                if (lowest == FLT_MAX || lowest >= map->sectors[s].floorH) continue;
+                Lift *lf = &sim->lifts[sim->liftCount];
+                memset(lf, 0, sizeof(*lf));
+                lf->sector = s;
+                lf->floor = lf->prevFloor = lf->highFloor = map->sectors[s].floorH;
+                lf->lowFloor = lowest;
+                lf->speed = 2.0f;
+                lf->state = LIFT_UP;
+                lf->stayLow = true;
+                sim->sectorLift[s] = sim->liftCount++;
+            } else if (isRaise && sim->sectorLift[s] < 0) {
+                // Destination: the next-higher neighbor floor.
+                float next = FLT_MAX;
+                for (int j = 0; j < map->lineCount; j++) {
+                    const Linedef *n = &map->lines[j];
+                    if (n->sideFront < 0 || n->sideBack < 0) continue;
+                    int fs = map->sides[n->sideFront].sector;
+                    int bs = map->sides[n->sideBack].sector;
+                    int other = (fs == s) ? bs : ((bs == s) ? fs : -1);
+                    if (other < 0 || other == s) continue;
+                    float f = map->sectors[other].floorH;
+                    if (f > map->sectors[s].floorH && f < next) next = f;
+                }
+                if (next == FLT_MAX) continue;
+                Lift *lf = &sim->lifts[sim->liftCount];
+                memset(lf, 0, sizeof(*lf));
+                lf->sector = s;
+                lf->floor = lf->prevFloor = lf->lowFloor = map->sectors[s].floorH;
+                lf->highFloor = next;
+                lf->speed = 1.0f;          // vanilla floor-move speed
+                lf->state = LIFT_LOW;
+                lf->stayLow = true;        // holds until activated
+                lf->riser = true;
+                sim->sectorLift[s] = sim->liftCount++;
+            }
+        }
+    }
+}
+
+static void RunLineAction(Sim *sim, int lineIdx)
+{
+    const Linedef *l = &sim->map->lines[lineIdx];
+    LineAction act = ActionForSpecial(l->special);
+    if (act.kind == ACT_NONE) return;
+    if (sim->lineUsed[lineIdx] && !act.repeat) return;
+    sim->lineUsed[lineIdx] = 1;
+
+    if (act.kind == ACT_EXIT) {
+        DgTriggerExit(sim);
+        return;
+    }
+    if (act.kind == ACT_TELEPORT) {
+        // Send him to the teleport-destination thing in the tagged sector.
+        for (int t = 0; t < sim->map->thingCount; t++) {
+            const Thing *th = &sim->map->things[t];
+            if (th->type != 14) continue;
+            int ds = SimSectorAtPoint(sim, th->x, th->y);
+            if (ds < 0 || sim->map->sectors[ds].tag != l->tag) continue;
+            sim->dg.pos = sim->dg.prevPos = (Vector2){ th->x, th->y };
+            sim->dg.sector = ds;
+            sim->dg.z = sim->dg.prevZ = SimSectorFloorNow(sim, ds);
+            Snd(sim, SND_TELEPT, sim->dg.pos);
+            if (StateLogEnabled()) {
+                StateLogBegin("teleport");
+                StateLogInt("tic", sim->tic);
+                StateLogFloat("x", th->x);
+                StateLogFloat("y", th->y);
+                StateLogEnd();
+            }
+            PlanCurrentObjective(sim, "teleported");
+            return;
+        }
+        return;
+    }
+    for (int s = 0; s < sim->map->sectorCount; s++) {
+        if (sim->map->sectors[s].tag != l->tag || l->tag <= 0) continue;
+        if (act.kind == ACT_PLAT || act.kind == ACT_FLOOR_LOWER ||
+            act.kind == ACT_FLOOR_RAISE) {
+            int li = sim->sectorLift[s];
+            if (li >= 0) LiftActivate(sim, li);
+        } else {
+            int di = sim->sectorDoor[s];
+            if (di < 0) continue;
+            Door *d = &sim->doors[di];
+            if (act.kind == ACT_DOOR_CLOSE) {
+                if (d->state == DOOR_OPEN || d->state == DOOR_OPENING) {
+                    d->state = DOOR_CLOSING;
+                    LogDoorEvent(sim, di, "remote_close");
+                }
+            } else {
+                d->stayOpen = (act.kind == ACT_DOOR_OPEN);
+                DoorUse(sim, di);
+            }
+        }
+    }
+}
+
+// Speedrunner trigger discipline: fire walkover lines crossed this move,
+// and press usable switches within reach every few tics.
+static void DgRunTriggers(Sim *sim, Vector2 from, Vector2 to)
+{
+    sim->stamp++;
+    float pad = DG_RADIUS + 4.0f;
+    int x0 = (int)((fminf(from.x, to.x) - pad - sim->bmOrgX) / BM_CELL);
+    int x1 = (int)((fmaxf(from.x, to.x) + pad - sim->bmOrgX) / BM_CELL);
+    int y0 = (int)((fminf(from.y, to.y) - pad - sim->bmOrgY) / BM_CELL);
+    int y1 = (int)((fmaxf(from.y, to.y) + pad - sim->bmOrgY) / BM_CELL);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= sim->bmW) x1 = sim->bmW - 1;
+    if (y1 >= sim->bmH) y1 = sim->bmH - 1;
+    bool pressTick = (sim->tic % 8) == 0;
+    for (int cy = y0; cy <= y1; cy++) {
+        for (int cx = x0; cx <= x1; cx++) {
+            int c = cy*sim->bmW + cx;
+            for (int k = sim->bmStart[c]; k < sim->bmStart[c + 1]; k++) {
+                int li = sim->bmLines[k];
+                if (sim->lineStamp[li] == sim->stamp) continue;
+                sim->lineStamp[li] = sim->stamp;
+                const Linedef *l = &sim->map->lines[li];
+                LineAction act = ActionForSpecial(l->special);
+                if (act.kind == ACT_NONE || act.kind == ACT_EXIT) continue;
+                if (sim->lineUsed[li] && !act.repeat) continue;
+                Vector2 a = sim->map->verts[l->v1], b = sim->map->verts[l->v2];
+                if (act.walk && SegsCross(from, to, a, b)) {
+                    RunLineAction(sim, li);
+                } else if (act.use && pressTick &&
+                           Dist2D(SegClosest(a, b, to), to) <= DG_USERANGE) {
+                    RunLineAction(sim, li);
+                }
+            }
+        }
+    }
 }
 
 // ------------------------------------------------------- triangle nav graph
@@ -510,23 +944,27 @@ static bool TriPairEdge(Sim *sim, const LineKey *lk, int lkN,
     const DoomMap *map = sim->map;
     int sa = sim->lm->floorTriSector[from->tri];
     int sb = sim->lm->floorTriSector[to->tri];
-    int line = -1, door = -1;
+    int line = -1, door = -1, lift = -1;
     if (sa != sb) {
         line = FindLineByKey(lk, lkN, from->a, from->b);
         if (line < 0) return false;
         const Linedef *l = &map->lines[line];
         if (l->flags & ML_BLOCKING) return false;
-        if (Dist2D(map->verts[l->v1], map->verts[l->v2]) < 2.0f*DG_RADIUS) return false;
-        const Sector *A = &map->sectors[sa], *B = &map->sectors[sb];
-        if (B->floorH - A->floorH > DG_STEP) return false;
+        // No per-segment width check: wide openings are often subdivided
+        // into many short collinear segments (stair edges); body clearance
+        // is enforced by movement collision instead.
+        if (PotentialFloorLow(sim, sb) - PotentialFloorHigh(sim, sa) > DG_STEP)
+            return false;
         float top = fminf(PotentialCeil(sim, sa), PotentialCeil(sim, sb));
-        float bottom = fmaxf(A->floorH, B->floorH);
+        float bottom = fmaxf(PotentialFloorLow(sim, sa), PotentialFloorLow(sim, sb));
         if (top - bottom < DG_HEIGHT) return false;
         door = (sim->sectorDoor[sb] >= 0) ? sim->sectorDoor[sb] : sim->sectorDoor[sa];
+        lift = (sim->sectorLift[sb] >= 0) ? sim->sectorLift[sb] : sim->sectorLift[sa];
     }
     out->to = to->tri;
     out->line = line;
     out->door = door;
+    out->lift = lift;
     out->wp = (Vector2){ (from->p0.x + from->p1.x)*0.5f, (from->p0.y + from->p1.y)*0.5f };
     return true;
 }
@@ -571,6 +1009,8 @@ static bool BuildTriNav(Sim *sim)
             sim->tEdgeCount = sim->tEdgeStart[sim->triCount];
             sim->tEdges = (NavEdge *)malloc((size_t)(sim->tEdgeCount > 0 ? sim->tEdgeCount : 1)
                                             * sizeof(NavEdge));
+            sim->tEdgeBlocked = (unsigned char *)calloc(
+                (size_t)(sim->tEdgeCount > 0 ? sim->tEdgeCount : 1), 1);
             fill = (int *)malloc((size_t)sim->triCount * sizeof(int));
             if (!sim->tEdges || !fill) { free(fill); free(ek); free(lk); return false; }
             memcpy(fill, sim->tEdgeStart, (size_t)sim->triCount * sizeof(int));
@@ -660,7 +1100,7 @@ static bool LineBlocksEnt(const Sim *sim, const Linedef *l, float z, bool flyer)
     float ceilA = (dfa >= 0) ? sim->doors[dfa].ceil : a->ceilH;
     float ceilB = (dfb >= 0) ? sim->doors[dfb].ceil : b->ceilH;
     float top = fminf(ceilA, ceilB);
-    float bottom = fmaxf(a->floorH, b->floorH);
+    float bottom = fmaxf(SimSectorFloorNow(sim, fs), SimSectorFloorNow(sim, bs));
     if (top - bottom < MOB_HEIGHT) return true;
     if (!flyer && bottom - z > DG_STEP) return true;
     return false;
@@ -748,6 +1188,7 @@ const char *DGStateName(DGState s)
     switch (s) {
     case DG_ADVANCE:   return "advance";
     case DG_WAIT_DOOR: return "wait_door";
+    case DG_WAIT_LIFT: return "wait_lift";
     case DG_FIGHT:     return "fight";
     case DG_RETREAT:   return "retreat";
     case DG_EXITED:    return "exited";
@@ -781,6 +1222,7 @@ static bool PruneLineBlocks(const Sim *sim, const Linedef *l)
     int bs = sim->map->sides[l->sideBack].sector;
     if (fs < 0 || bs < 0) return true;
     if (sim->sectorDoor[fs] >= 0 || sim->sectorDoor[bs] >= 0) return true;
+    if (sim->sectorLift[fs] >= 0 || sim->sectorLift[bs] >= 0) return true;
     const Sector *a = &sim->map->sectors[fs];
     const Sector *b = &sim->map->sectors[bs];
     if (fabsf(a->floorH - b->floorH) > DG_STEP) return true;
@@ -847,11 +1289,13 @@ static void PruneRoute(Sim *sim)
         int limit = i + 24;
         for (int j = i; j < dg->wpCount && j <= limit; j++) {
             if (SegClear(sim, cur, dg->wp[j])) far = j;
-            if (dg->wpDoor[j] >= 0) break;
+            if (dg->wpDoor[j] >= 0 || dg->wpLift[j] >= 0) break;
         }
         dg->wp[out] = dg->wp[far];
         dg->wpFloor[out] = dg->wpFloor[far];
         dg->wpDoor[out] = dg->wpDoor[far];
+        dg->wpLift[out] = dg->wpLift[far];
+        dg->wpEdge[out] = dg->wpEdge[far];
         cur = dg->wp[out];
         out++;
         i = far + 1;
@@ -875,7 +1319,7 @@ static bool LineSightOpening(const Sim *sim, const Linedef *l,
     float ceilA = (dfa >= 0) ? sim->doors[dfa].ceil : sim->map->sectors[fs].ceilH;
     float ceilB = (dfb >= 0) ? sim->doors[dfb].ceil : sim->map->sectors[bs].ceilH;
     *top = fminf(ceilA, ceilB);
-    *bottom = fmaxf(sim->map->sectors[fs].floorH, sim->map->sectors[bs].floorH);
+    *bottom = fmaxf(SimSectorFloorNow(sim, fs), SimSectorFloorNow(sim, bs));
     return (*top - *bottom) >= 8.0f;
 }
 
@@ -1635,10 +2079,15 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
         dg->wp = (Vector2 *)malloc(sizeof(Vector2));
         dg->wpFloor = (float *)malloc(sizeof(float));
         dg->wpDoor = (int *)malloc(sizeof(int));
-        if (!dg->wp || !dg->wpFloor || !dg->wpDoor) return false;
+        dg->wpLift = (int *)malloc(sizeof(int));
+        dg->wpEdge = (int *)malloc(sizeof(int));
+        if (!dg->wp || !dg->wpFloor || !dg->wpDoor || !dg->wpLift || !dg->wpEdge)
+            return false;
         dg->wp[0] = goalPos;
         dg->wpFloor[0] = map->sectors[goalSector].floorH;
         dg->wpDoor[0] = -1;
+        dg->wpLift[0] = -1;
+        dg->wpEdge[0] = -1;
         dg->wpCount = 1;
         return true;
     }
@@ -1660,6 +2109,7 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
         n[cur].state = 2;
         for (int e = estart[cur]; e < estart[cur + 1]; e++) {
             const NavEdge *E = &edges[e];
+            if (triGraph && sim->tEdgeBlocked && sim->tEdgeBlocked[e]) continue;
             float ng = n[cur].g + Dist2D(n[cur].entry, E->wp)
                      + ((E->door >= 0) ? DOOR_COST : 0.0f);
             if (n[E->to].state == 0 || ng < n[E->to].g - 0.01f) {
@@ -1678,7 +2128,12 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
     dg->wp = (Vector2 *)malloc((size_t)(len + 1) * sizeof(Vector2));
     dg->wpFloor = (float *)malloc((size_t)(len + 1) * sizeof(float));
     dg->wpDoor = (int *)malloc((size_t)(len + 1) * sizeof(int));
-    if (!dg->wp || !dg->wpFloor || !dg->wpDoor) { free(n); return false; }
+    dg->wpLift = (int *)malloc((size_t)(len + 1) * sizeof(int));
+    dg->wpEdge = (int *)malloc((size_t)(len + 1) * sizeof(int));
+    if (!dg->wp || !dg->wpFloor || !dg->wpDoor || !dg->wpLift || !dg->wpEdge) {
+        free(n);
+        return false;
+    }
     int k = len - 1;
     for (int s = goalNode; s != startNode; s = n[s].parentNode, k--) {
         const NavEdge *E = &edges[n[s].parentEdge];
@@ -1686,10 +2141,14 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
         dg->wp[k] = E->wp;
         dg->wpFloor[k] = map->sectors[destSector].floorH;
         dg->wpDoor[k] = E->door;
+        dg->wpLift[k] = E->lift;
+        dg->wpEdge[k] = triGraph ? n[s].parentEdge : -1;
     }
     dg->wp[len] = goalPos;
     dg->wpFloor[len] = map->sectors[goalSector].floorH;
     dg->wpDoor[len] = -1;
+    dg->wpLift[len] = -1;
+    dg->wpEdge[len] = -1;
     dg->wpCount = len + 1;
     free(n);
     return true;
@@ -1751,12 +2210,17 @@ static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
     free(dg->wp);
     free(dg->wpFloor);
     free(dg->wpDoor);
+    free(dg->wpLift);
+    free(dg->wpEdge);
     dg->wp = NULL;
     dg->wpFloor = NULL;
     dg->wpDoor = NULL;
+    dg->wpLift = NULL;
+    dg->wpEdge = NULL;
     dg->wpCount = 0;
     dg->wpCursor = 0;
     dg->waitDoor = -1;
+    dg->waitLift = -1;
     dg->replans++;
 
     bool ok = false;
@@ -1974,7 +2438,7 @@ static void DgUpdateGround(Sim *sim)
     int sec = SimSectorAtPoint(sim, dg->pos.x, dg->pos.y);
     if (sec >= 0) {
         dg->sector = sec;
-        dg->z = sim->map->sectors[sec].floorH;
+        dg->z = SimSectorFloorNow(sim, sec);
     }
 }
 
@@ -1987,6 +2451,37 @@ static void DgFollowRoute(Sim *sim)
         if (!PlanCurrentObjective(sim, "route_exhausted")) return;
     }
     Vector2 target = dg->wp[dg->wpCursor];
+
+    // Standing on a moving lift: ride it, don't grind against the shaft.
+    int onLift = (dg->sector >= 0) ? sim->sectorLift[dg->sector] : -1;
+    if (onLift >= 0 && (sim->lifts[onLift].state == LIFT_RISING ||
+                        sim->lifts[onLift].state == LIFT_DOWN)) {
+        dg->z = sim->lifts[onLift].floor;
+        dg->stuckTics = 0;
+        return;
+    }
+
+    int li = dg->wpLift[dg->wpCursor];
+    if (li >= 0) {
+        Lift *l = &sim->lifts[li];
+        if (l->floor - dg->z > DG_STEP &&
+            Dist2D(dg->pos, target) <= DG_USERANGE + 64.0f) {
+            // The platform is above him: call it down, or wait while it moves.
+            if (l->state == LIFT_UP) {
+                if (LiftTriggerInRange(sim, li, dg->pos)) {
+                    LiftActivate(sim, li);
+                    dg->waitLift = li;
+                    DgSetState(sim, DG_WAIT_LIFT, "lift_up");
+                    return;
+                }
+                // else: keep walking; the trigger line sits closer in
+            } else {
+                dg->waitLift = li;
+                DgSetState(sim, DG_WAIT_LIFT, "lift_moving");
+                return;
+            }
+        }
+    }
 
     int di = dg->wpDoor[dg->wpCursor];
     if (di >= 0) {
@@ -2003,11 +2498,14 @@ static void DgFollowRoute(Sim *sim)
     DgFace(dg, target, TURN_PER_TIC);
     float dx = target.x - dg->pos.x, dy = target.y - dg->pos.y;
     float dist = sqrtf(dx*dx + dy*dy);
+    Vector2 before = dg->pos;
     if (dist > 0.001f) {
         float step = (DG_RUNSPEED < dist) ? DG_RUNSPEED : dist;
         MoveEntity(sim, &dg->pos, dg->z, DG_RADIUS,
                    (Vector2){ dx/dist*step, dy/dist*step }, false, -1);
     }
+    DgRunTriggers(sim, before, dg->pos);
+    if (dg->state != DG_ADVANCE && dg->state != DG_RETREAT) return; // teleported/exited
     DgUpdateGround(sim);
 
     bool last = (dg->wpCursor == dg->wpCount - 1);
@@ -2016,6 +2514,7 @@ static void DgFollowRoute(Sim *sim)
     float arrive = last ? ((dg->objective != OBJ_EXIT) ? 12.0f : DG_USERANGE*0.75f)
                         : WP_ARRIVE;
     if (Dist2D(dg->pos, target) < arrive) {
+        dg->stuckStrikes = 0;
         if (last) {
             if (dg->objective == OBJ_EXIT) {
                 if (sim->exitLine >= 0) DgTriggerExit(sim);
@@ -2044,6 +2543,29 @@ static void DgFollowRoute(Sim *sim)
     if (Dist2D(dg->pos, dg->prevPos) < 0.5f) {
         if (++dg->stuckTics >= STUCK_TICS) {
             dg->stuckTics = 0;
+            dg->stuckStrikes++;
+            // Self-healing nav: the edge we're grinding against lied about
+            // being passable (squeeze, ledge lip, ...). Ban it for this run.
+            int e = (dg->wpEdge && dg->wpCursor < dg->wpCount)
+                        ? dg->wpEdge[dg->wpCursor] : -1;
+            if (e >= 0 && sim->tEdgeBlocked) {
+                sim->tEdgeBlocked[e] = 1;
+                if (StateLogEnabled()) {
+                    StateLogBegin("nav_edge_banned");
+                    StateLogInt("tic", sim->tic);
+                    StateLogInt("edge", e);
+                    StateLogFloat("x", dg->pos.x);
+                    StateLogFloat("y", dg->pos.y);
+                    StateLogEnd();
+                }
+            }
+            if (dg->stuckStrikes >= 4 && dg->objective == OBJ_WEAPON &&
+                dg->weaponPickup >= 0) {
+                sim->pickups[dg->weaponPickup].unreachable = true;
+                dg->weaponPickup = -1;
+                dg->objective = OBJ_EXIT;
+                dg->stuckStrikes = 0;
+            }
             PlanCurrentObjective(sim, "stuck");
         }
     } else {
@@ -2103,9 +2625,11 @@ static void DgFightTick(Sim *sim)
     float ml = sqrtf(mv.x*mv.x + mv.y*mv.y);
     if (ml > 0.01f) { mv.x /= ml; mv.y /= ml; }
     float speed = DG_RUNSPEED;   // circle-strafe at full run, like he means it
+    Vector2 before = dg->pos;
     float moved = MoveEntity(sim, &dg->pos, dg->z, DG_RADIUS,
                              (Vector2){ mv.x*speed, mv.y*speed }, false, -1);
     if (moved < speed*0.3f || SimRandom(sim) < 3) dg->strafeDir = -dg->strafeDir;
+    DgRunTriggers(sim, before, dg->pos);
     DgUpdateGround(sim);
 }
 
@@ -2179,6 +2703,23 @@ static void DgTick(Sim *sim)
             DgSetState(sim, DG_ADVANCE, "door_open");
         } else if (d->state == DOOR_CLOSED || d->state == DOOR_CLOSING) {
             DoorUse(sim, dg->waitDoor);   // re-use if it raced shut
+        }
+        break;
+    }
+    case DG_WAIT_LIFT: {
+        DgRunTriggers(sim, dg->pos, dg->pos);   // press the call switch
+        Lift *l = &sim->lifts[dg->waitLift];
+        if (l->floor - dg->z <= DG_STEP) {
+            dg->waitLift = -1;
+            DgSetState(sim, DG_ADVANCE, "lift_arrived");
+        } else if (l->state == LIFT_UP) {
+            // It went back up without him; call it again or step closer.
+            if (LiftTriggerInRange(sim, dg->waitLift, dg->pos)) {
+                LiftActivate(sim, dg->waitLift);
+            } else {
+                dg->waitLift = -1;
+                DgSetState(sim, DG_ADVANCE, "lift_left");
+            }
         }
         break;
     }
@@ -2279,6 +2820,7 @@ static bool SpawnDoomGuy(Sim *sim)
         dg->z = (dg->sector >= 0) ? map->sectors[dg->sector].floorH : 0.0f;
         dg->prevZ = dg->z;
         dg->waitDoor = -1;
+        dg->waitLift = -1;
         return true;
     }
     return false;
@@ -2481,9 +3023,13 @@ void SimFree(Sim *sim)
     free(sim->lineStamp);
     free(sim->doors);
     free(sim->sectorDoor);
+    free(sim->lifts);
+    free(sim->sectorLift);
+    free(sim->lineUsed);
     free(sim->dg.wp);
     free(sim->dg.wpFloor);
     free(sim->dg.wpDoor);
+    free(sim->dg.wpLift);
     memset(sim, 0, sizeof(*sim));
 }
 
@@ -2494,7 +3040,14 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
     sim->lm = lm;
     RndInit(sim);
 
-    if (!BuildDoors(sim) || !BuildNav(sim) || !BuildTriNav(sim) || !BuildBlockmap(sim)) {
+    sim->lineUsed = (unsigned char *)calloc((size_t)map->lineCount, 1);
+    if (!sim->lineUsed || !BuildDoors(sim) || !BuildLifts(sim)) {
+        TraceLog(LOG_ERROR, "SIM: out of memory building sim");
+        SimFree(sim);
+        return false;
+    }
+    BuildTaggedActions(sim);
+    if (!BuildNav(sim) || !BuildTriNav(sim) || !BuildBlockmap(sim)) {
         TraceLog(LOG_ERROR, "SIM: out of memory building sim");
         SimFree(sim);
         return false;
@@ -2521,15 +3074,17 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
     for (int i = 0; i < sim->doorCount; i++) lockedDoors += sim->doors[i].locked ? 1 : 0;
     TraceLog(LOG_INFO,
              "SIM: %d tri edges, %d sector edges, %d doors (%d locked), "
-             "exit line %d, route %s (%d wps)",
+             "%d lifts, exit line %d, route %s (%d wps)",
              sim->tEdgeCount, sim->edgeCount, sim->doorCount, lockedDoors,
-             sim->exitLine, (sim->dg.wpCount > 0) ? "ok" : "NONE", sim->dg.wpCount);
+             sim->liftCount, sim->exitLine,
+             (sim->dg.wpCount > 0) ? "ok" : "NONE", sim->dg.wpCount);
 
     if (StateLogEnabled()) {
         StateLogBegin("sim_init");
         StateLogInt("nav_tri_edges", sim->tEdgeCount);
         StateLogInt("nav_edges", sim->edgeCount);
         StateLogInt("doors", sim->doorCount);
+        StateLogInt("lifts", sim->liftCount);
         StateLogInt("locked_doors", lockedDoors);
         StateLogInt("exit_line", sim->exitLine);
         StateLogObjBegin("start");
@@ -2560,6 +3115,7 @@ void SimTick(Sim *sim)
     }
     PendingTick(sim);
     for (int i = 0; i < sim->doorCount; i++) DoorTick(sim, i);
+    for (int i = 0; i < sim->liftCount; i++) LiftTick(sim, i);
     DgTick(sim);
     for (int i = 0; i < sim->mobCount; i++) MobTick(sim, i);
     for (int i = 0; i < PROJS_MAX; i++) {
