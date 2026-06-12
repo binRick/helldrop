@@ -66,10 +66,17 @@ typedef enum MobKind {
     MK_IMP,         // 3001: fireball + claw
     MK_PINKY,       // 3002: fast melee wall
     MK_CACO,        // 3005: flyer, ball + bite
+    MK_ARCHVILE,    // 64:   flame channel + raises corpses (the Corpse Bank)
     MK_COUNT
 } MobKind;
 
-typedef enum MobState { MOB_IDLE, MOB_CHASE, MOB_ATTACK, MOB_PAIN, MOB_DEAD } MobState;
+typedef enum MobState {
+    MOB_IDLE, MOB_CHASE, MOB_ATTACK, MOB_PAIN, MOB_RAISE, MOB_DEAD
+} MobState;
+
+// Raisable corpses are capped; beyond this the oldest decay (gib) and the
+// arch-vile can no longer bank them.
+#define CORPSES_MAX 64
 
 typedef struct Mob {
     MobKind kind;
@@ -84,6 +91,9 @@ typedef struct Mob {
     int dodgeTics;          // blocked-path wiggle, Doom A_Chase style
     float dodgeDir;
     long deathTic;          // when it died; drives the death animation
+    int raiseTarget;        // arch-vile: corpse being resurrected
+    int raiseCooldown;      // arch-vile: ~3s between resurrections
+    bool gibbed;            // overkilled/decayed: beyond resurrection
     bool awake;
     bool playerDropped;
 } Mob;
@@ -92,10 +102,11 @@ typedef struct Mob {
 // sim headless. `head` counts monotonically; readers keep their own cursor.
 typedef enum SimSnd {
     SND_PISTOL, SND_SHOTGUN, SND_FIRSHT, SND_FIRXPL, SND_CLAW, SND_SGTATK,
-    SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
-    SND_POPAIN, SND_DMPAIN, SND_PLPAIN,
-    SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_PLDETH,
+    SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
+    SND_POPAIN, SND_DMPAIN, SND_PLPAIN, SND_VIPAIN,
+    SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH, SND_PLDETH,
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
+    SND_VILATK, SND_FLAMST, SND_SLOP,
     SND_COUNT
 } SimSnd;
 

@@ -31,13 +31,13 @@ static void Snd(struct Sim *sim, int id, Vector2 pos)
 
 // Per-kind voice lines: sight, pain, death, melee.
 static const int MOB_SND_SIGHT[MK_COUNT] = {
-    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
+    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
 };
 static const int MOB_SND_PAIN[MK_COUNT] = {
-    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN,
+    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN, SND_VIPAIN,
 };
 static const int MOB_SND_DEATH[MK_COUNT] = {
-    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH,
+    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH,
 };
 
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
@@ -71,7 +71,17 @@ static const MobInfo MOB_INFO[MK_COUNT] = {
                         80.0f, 4, 10, false, 0.0f, 0,  0, false, -1, 38 },
     [MK_CACO]       = { "cacodemon",  3005, 400, 31.0f, 1.6f, 128,
                         90.0f, 10, 6,  true, 10.0f, 5,  0, true, -1, 65 },
+    // The flame attack and resurrection are special-cased in MobTick.
+    [MK_ARCHVILE]   = { "archvile",     64, 700, 20.0f, 3.0f,  10,
+                        0.0f, 0, 0,  false, 0.0f, 0,  0, false, -1, 220 },
 };
+
+#define VILE_FLAME_TICS 24      // channel length; damage lands near the end
+#define VILE_FLAME_RANGE 900.0f
+#define VILE_FLAME_DMG 20       // vanilla direct hit
+#define VILE_RAISE_RADIUS 120.0f
+#define VILE_RAISE_TICS 12
+#define VILE_RAISE_COOLDOWN 105 // DESIGN.md: ~one resurrection per 3s
 
 int SimDropBaseCost(MobKind kind)
 {
@@ -105,6 +115,7 @@ const char *MobStateName(MobState s)
     case MOB_CHASE:  return "chase";
     case MOB_ATTACK: return "attack";
     case MOB_PAIN:   return "pain";
+    case MOB_RAISE:  return "raise";
     case MOB_DEAD:   return "dead";
     }
     return "?";
@@ -982,9 +993,31 @@ static void LogMobDeath(const Sim *sim, const Mob *m, int attackerMob)
                                         : MobKindName(sim->mobs[attackerMob].kind));
     StateLogBool("infight", attackerMob >= 0);
     StateLogBool("player_dropped", m->playerDropped);
+    StateLogBool("gibbed", m->gibbed);
     StateLogFloat("x", m->pos.x);
     StateLogFloat("y", m->pos.y);
     StateLogEnd();
+}
+
+// Keep the bank bounded: beyond CORPSES_MAX raisable bodies, the oldest
+// decay into gibs the arch-vile can't use.
+static void DecayCorpses(Sim *sim)
+{
+    for (;;) {
+        int raisable = 0, oldest = -1;
+        long oldestTic = 0;
+        for (int i = 0; i < sim->mobCount; i++) {
+            Mob *m = &sim->mobs[i];
+            if (m->state != MOB_DEAD || m->gibbed) continue;
+            raisable++;
+            if (oldest < 0 || m->deathTic < oldestTic) {
+                oldest = i;
+                oldestTic = m->deathTic;
+            }
+        }
+        if (raisable <= CORPSES_MAX || oldest < 0) return;
+        sim->mobs[oldest].gibbed = true;
+    }
 }
 
 static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
@@ -1018,9 +1051,13 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
         m->state = MOB_DEAD;
         m->stateTics = 0;
         m->deathTic = sim->tic;
+        // Vanilla gib rule: overkill past -spawnhealth destroys the corpse —
+        // a gibbed body is withdrawn from the arch-vile's bank for good.
+        m->gibbed = (m->health <= -MOB_INFO[m->kind].health);
         Snd(sim, MOB_SND_DEATH[m->kind], m->pos);
         if (attackerMob < 0) sim->kills++;
         LogMobDeath(sim, m, attackerMob);
+        DecayCorpses(sim);
         int drop = MOB_INFO[m->kind].drop;
         if (drop >= 0) SpawnPickup(sim, (PickupType)drop, m->pos, m->z, true);
         return;
@@ -1273,11 +1310,59 @@ static void MobFace(Mob *m, Vector2 to, float maxTurn)
     m->angleDeg += err;
 }
 
+// Nearest raisable corpse within reach of the arch-vile, or -1. Viles
+// cannot raise other viles (vanilla: no raise state).
+static int FindCorpse(const Sim *sim, const Mob *vile)
+{
+    int best = -1;
+    float bestD = VILE_RAISE_RADIUS;
+    for (int i = 0; i < sim->mobCount; i++) {
+        const Mob *c = &sim->mobs[i];
+        if (c->state != MOB_DEAD || c->gibbed || c->kind == MK_ARCHVILE) continue;
+        float d = Dist2D(vile->pos, c->pos);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+}
+
+static void Resurrect(Sim *sim, int vileIdx, int corpseIdx)
+{
+    Mob *c = &sim->mobs[corpseIdx];
+    c->state = MOB_CHASE;
+    c->health = MOB_INFO[c->kind].health/2;   // DESIGN.md: raised at half HP
+    c->awake = true;
+    c->targetMob = -1;
+    c->deathTic = 0;
+    c->prevPos = c->pos;
+    c->prevZ = c->z;
+    Snd(sim, SND_SLOP, c->pos);
+    if (StateLogEnabled()) {
+        StateLogBegin("resurrect");
+        StateLogInt("tic", sim->tic);
+        StateLogStr("kind", MobKindName(c->kind));
+        StateLogInt("hp", c->health);
+        StateLogFloat("x", c->pos.x);
+        StateLogFloat("y", c->pos.y);
+        StateLogInt("vile", vileIdx);
+        StateLogEnd();
+    }
+}
+
 static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG, int targetMob)
 {
     Mob *m = &sim->mobs[idx];
     const MobInfo *inf = &MOB_INFO[m->kind];
     float dist = Dist2D(m->pos, tpos);
+    if (m->kind == MK_ARCHVILE) {
+        // The flame lands only if he still has line of sight at the end of
+        // the channel — breaking sight behind a wall dodges it, vanilla-style.
+        if (SightClearZ(sim, m->pos, m->z + 32.0f, tpos, tz + 24.0f)) {
+            if (targetIsDG) DamageDG(sim, VILE_FLAME_DMG, idx);
+            else DamageMob(sim, targetMob, VILE_FLAME_DMG, idx);
+            Snd(sim, SND_FIRXPL, tpos);
+        }
+        return;
+    }
     if (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius) {
         Snd(sim, (m->kind == MK_PINKY) ? SND_SGTATK : SND_CLAW, m->pos);
         int dmg = (SimRandom(sim)%inf->meleeDie + 1) * inf->meleeMult;
@@ -1338,28 +1423,54 @@ static void MobTick(Sim *sim, int idx)
     case MOB_PAIN:
         if (--m->stateTics <= 0) m->state = MOB_CHASE;
         break;
+    case MOB_RAISE:
+        m->stateTics--;
+        if (m->stateTics == 4 && m->raiseTarget >= 0 &&
+            sim->mobs[m->raiseTarget].state == MOB_DEAD &&
+            !sim->mobs[m->raiseTarget].gibbed) {
+            Resurrect(sim, idx, m->raiseTarget);
+        }
+        if (m->stateTics <= 0) {
+            m->state = MOB_CHASE;
+            m->raiseTarget = -1;
+            m->raiseCooldown = VILE_RAISE_COOLDOWN;
+        }
+        break;
     case MOB_ATTACK:
         MobFace(m, tpos, 45.0f);
         m->stateTics--;
         if (m->stateTics == 4) MobAttack(sim, idx, tpos, tz, targetIsDG, m->targetMob);
         if (m->stateTics <= 0) {
             m->state = MOB_CHASE;
-            m->attackCooldown = 30 + SimRandom(sim)%50;
+            m->attackCooldown = (m->kind == MK_ARCHVILE ? 60 : 30) + SimRandom(sim)%50;
         }
         break;
     case MOB_CHASE: {
         if (m->attackCooldown > 0) m->attackCooldown--;
+        if (m->raiseCooldown > 0) m->raiseCooldown--;
+        // The Corpse Bank: a vile near a raisable body always banks it first.
+        if (m->kind == MK_ARCHVILE && m->raiseCooldown <= 0) {
+            int corpse = FindCorpse(sim, m);
+            if (corpse >= 0) {
+                m->state = MOB_RAISE;
+                m->stateTics = VILE_RAISE_TICS;
+                m->raiseTarget = corpse;
+                break;
+            }
+        }
         float dist = Dist2D(m->pos, tpos);
         bool melee = (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius);
-        bool ranged = (inf->pellets > 0 || inf->hasMissile);
+        bool ranged = (inf->pellets > 0 || inf->hasMissile || m->kind == MK_ARCHVILE);
+        float reach = (m->kind == MK_ARCHVILE) ? VILE_FLAME_RANGE : 1100.0f;
         if (m->attackCooldown <= 0 && (melee ||
-            (ranged && dist < 1100.0f &&
+            (ranged && dist < reach &&
              SightClearZ(sim, m->pos, m->z + 32.0f, tpos, tz + 24.0f)))) {
             // Doom-ish gate: the closer the target, the likelier the attack.
             int gate = melee ? 256 : 70 + (int)fmaxf(0.0f, 110.0f - dist*0.09f);
             if (SimRandom(sim) < gate) {
                 m->state = MOB_ATTACK;
-                m->stateTics = 10;
+                m->stateTics = (m->kind == MK_ARCHVILE) ? VILE_FLAME_TICS : 10;
+                if (m->kind == MK_ARCHVILE) Snd(sim, SND_VILATK, m->pos);
                 break;
             }
             m->attackCooldown = 6 + SimRandom(sim)%10;
@@ -1919,7 +2030,22 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     float floorH = SimFloorAtPoint(sim, x, y, &onMap);
     if (!onMap) return -1;
     if (playerDropped) Snd(sim, SND_TELEPT, (Vector2){ x, y });
-    int idx = sim->mobCount++;
+    int idx;
+    if (sim->mobCount < MOBS_MAX) {
+        idx = sim->mobCount++;
+    } else {
+        // Array full: reclaim the oldest gibbed corpse slot.
+        idx = -1;
+        long oldest = 0;
+        for (int i = 0; i < sim->mobCount; i++) {
+            if (sim->mobs[i].state != MOB_DEAD || !sim->mobs[i].gibbed) continue;
+            if (idx < 0 || sim->mobs[i].deathTic < oldest) {
+                idx = i;
+                oldest = sim->mobs[i].deathTic;
+            }
+        }
+        if (idx < 0) return -1;
+    }
     Mob *m = &sim->mobs[idx];
     *m = (Mob){ 0 };
     m->kind = kind;
@@ -1930,6 +2056,7 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     m->state = awake ? MOB_CHASE : MOB_IDLE;
     m->awake = awake;
     m->targetMob = -1;
+    m->raiseTarget = -1;
     m->playerDropped = playerDropped;
     return idx;
 }

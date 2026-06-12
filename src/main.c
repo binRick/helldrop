@@ -293,6 +293,7 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_IMP]        = { 185,  90,  55, 255 },
     [MK_PINKY]      = { 240, 135, 160, 255 },
     [MK_CACO]       = { 215,  70,  80, 255 },
+    [MK_ARCHVILE]   = { 250, 225, 110, 255 },
 };
 
 static Vector3 MobRenderPos(const Mob *m, float alpha)
@@ -1006,6 +1007,7 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_THREE)) selectedKind = MK_IMP;
         if (IsKeyPressed(KEY_FOUR))  selectedKind = MK_PINKY;
         if (IsKeyPressed(KEY_FIVE))  selectedKind = MK_CACO;
+        if (IsKeyPressed(KEY_SIX))   selectedKind = MK_ARCHVILE;
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);
@@ -1038,11 +1040,15 @@ int main(int argc, char **argv)
             // Dev smoke test: periodically drop a squad just ahead of him so
             // combat/infighting/drops exercise without a human at the mouse.
             if (opt.autodrop && sim.tic >= 250 && sim.tic % 250 == 0) {
-                static const MobKind WAVE[4] = { MK_PINKY, MK_IMP, MK_CACO, MK_PINKY };
+                // Odd waves bring an arch-vile to bank the previous wave's
+                // corpses — the smoke test for resurrection.
+                static const MobKind WAVE_A[4] = { MK_PINKY, MK_IMP, MK_CACO, MK_PINKY };
+                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_ZOMBIE, MK_IMP, MK_PINKY };
+                const MobKind *wave = ((sim.tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
                 float a = sim.dg.angleDeg*DEG2RAD;
                 for (int w = 0; w < 4; w++) {
                     float side = (w % 2 == 0) ? 60.0f : -60.0f;
-                    SimDrop(&sim, WAVE[w],
+                    SimDrop(&sim, wave[w],
                             sim.dg.pos.x + cosf(a)*200.0f - sinf(a)*side,
                             sim.dg.pos.y + sinf(a)*200.0f + cosf(a)*side);
                 }
@@ -1067,6 +1073,17 @@ int main(int argc, char **argv)
         DrawMobs(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
         DrawProjectiles(&sim, simAlpha, &gsprites, cam);
         DrawDoomGuy(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
+        // Arch-vile flame burns on the victim for the whole channel.
+        for (int i = 0; i < sim.mobCount; i++) {
+            const Mob *m = &sim.mobs[i];
+            if (m->kind != MK_ARCHVILE || m->state != MOB_ATTACK) continue;
+            const SpriteFrame *ff = FireSpriteFrame(&gsprites, sim.tic);
+            if (!ff) break;
+            Vector3 at = (m->targetMob < 0)
+                             ? DgRenderPos(&sim, simAlpha)
+                             : MobRenderPos(&sim.mobs[m->targetMob], simAlpha);
+            DrawSpriteBillboard(cam, ff, 0, at, WHITE);
+        }
         if (gsprites.valid) EndShaderMode();
         DrawTracers(&sim);
         DrawPendingDrops(&sim, frame);

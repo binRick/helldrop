@@ -13,17 +13,19 @@ typedef struct MobAnim {
     const char *attack;   // played across the ATTACK windup
     char pain;
     const char *death;    // played once from deathTic, holds last frame
+    const char *heal;     // arch-vile resurrection pose, NULL otherwise
 } MobAnim;
 
 static const MobAnim MOB_ANIM[MK_COUNT] = {
-    [MK_ZOMBIE]     = { "POSS", "ABCD", "EF",  'G', "HIJKL" },
-    [MK_SHOTGUNGUY] = { "SPOS", "ABCD", "EF",  'G', "HIJKL" },
-    [MK_IMP]        = { "TROO", "ABCD", "EFG", 'H', "IJKLM" },
-    [MK_PINKY]      = { "SARG", "ABCD", "EFG", 'H', "IJKLMN" },
-    [MK_CACO]       = { "HEAD", "A",    "BCD", 'E', "FGHIJK" },
+    [MK_ZOMBIE]     = { "POSS", "ABCD",   "EF",  'G', "HIJKL", NULL },
+    [MK_SHOTGUNGUY] = { "SPOS", "ABCD",   "EF",  'G', "HIJKL", NULL },
+    [MK_IMP]        = { "TROO", "ABCD",   "EFG", 'H', "IJKLM", NULL },
+    [MK_PINKY]      = { "SARG", "ABCD",   "EFG", 'H', "IJKLMN", NULL },
+    [MK_CACO]       = { "HEAD", "A",      "BCD", 'E', "FGHIJK", NULL },
+    [MK_ARCHVILE]   = { "VILE", "ABCDEF", "GHIJKLMNOP", 'Q', "RSTUVWXYZ", "[\\]" },
 };
 
-static const MobAnim PLAYER_ANIM = { "PLAY", "ABCD", "EF", 'G', "HIJKLMN" };
+static const MobAnim PLAYER_ANIM = { "PLAY", "ABCD", "EF", 'G', "HIJKLMN", NULL };
 
 static const char *PICKUP_LUMPS[8] = {
     [PK_STIM] = "STIM", [PK_MEDIKIT] = "MEDI", [PK_ARMOR] = "ARM1",
@@ -95,6 +97,7 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal);
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
+    SpriteSetLoad(&gs->fire, wad, "FIRE", pal);
     for (int p = 0; p < 8; p++) {
         SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal);
     }
@@ -112,6 +115,7 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->player);
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
+    SpriteSetUnload(&gs->fire);
     for (int p = 0; p < 8; p++) SpriteSetUnload(&gs->pickups[p]);
     if (gs->alphaTest.id != 0) UnloadShader(gs->alphaTest);
     memset(gs, 0, sizeof(*gs));
@@ -144,10 +148,17 @@ const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic)
         return PickDeath(set, an->death, tic - m->deathTic);
     case MOB_PAIN:
         return Pick(set, an->pain);
+    case MOB_RAISE:
+        if (an->heal) {
+            int n = (int)strlen(an->heal);
+            return Pick(set, an->heal[(tic/4) % n]);
+        }
+        return Pick(set, an->walk[0]);
     case MOB_ATTACK: {
-        // stateTics counts 10 -> 0 across the windup; spread attack frames.
+        // stateTics counts windup -> 0; spread the attack frames across it.
+        int total = (m->kind == MK_ARCHVILE) ? 24 : 10;
         int n = (int)strlen(an->attack);
-        int i = (10 - m->stateTics)*n/11;
+        int i = (total - m->stateTics)*n/(total + 1);
         if (i < 0) i = 0;
         if (i >= n) i = n - 1;
         return Pick(set, an->attack[i]);
@@ -188,6 +199,15 @@ const SpriteFrame *BallSpriteFrame(const GameSprites *gs, MobKind owner, long ti
     if (!set->any) return NULL;
     if (set->frames[1].present) return Pick(set, (tic/4) % 2 ? 'B' : 'A');
     return Pick(set, 'A');
+}
+
+const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic)
+{
+    if (!gs->fire.any) return NULL;
+    int n = 0;
+    while (n < 8 && gs->fire.frames[n].present) n++;
+    if (n == 0) return NULL;
+    return Pick(&gs->fire, (char)('A' + (tic/3) % n));
 }
 
 int SpriteRotation(float entAngleDeg, float camYawDeg)

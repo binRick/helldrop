@@ -65,7 +65,13 @@ change** (`statelog.h` has the writer API).
   (IDLE/CHASE/ATTACK/PAIN/DEAD, sight+sound wake, blocked-path wiggle),
   hitscan with tracers, projectiles, the vanilla **infighting** retarget
   rule (different species only), corpses, pickups (he loots zombie clip
-  drops — Feeding the Slayer), and his weapon/ammo/armor sim. Sight and
+  drops — Feeding the Slayer), and his weapon/ammo/armor sim. **The Corpse
+  Bank**: corpses persist as a resource; the arch-vile (key 6, 220 souls)
+  raises non-gibbed bodies within 120 units at half HP, one per ~3s, free.
+  Counterplay hooks: overkill past -spawnhealth gibs a corpse beyond
+  raising (vanilla rule), and beyond CORPSES_MAX raisable bodies the
+  oldest decay. His flame attack is a 24-tic channel that whiffs if line
+  of sight breaks before it lands. Sight and
   hitscan are height-aware: `SightT` interpolates the ray's z through every
   crossed line's vertical opening, so ledge steps and half-open doors block
   shots like real walls. Map things spawn at the Hurt-Me-Plenty skill

@@ -12,7 +12,7 @@
 // Rotation 0 lumps face every direction. All sets are optional — a missing
 // monster falls back to the capsule renderer.
 
-#define SPR_FRAMES 26   // frame letters A..Z
+#define SPR_FRAMES 29   // frame letters A..Z plus [ \ ] (arch-vile heal)
 
 typedef struct SpriteFrame {
     Texture2D tex[8];   // by rotation, 0 = facing the viewer
@@ -31,6 +31,7 @@ typedef struct GameSprites {
     SpriteSet mobs[MK_COUNT];
     SpriteSet player;
     SpriteSet ball[2];          // BAL1 (imp), BAL2 (caco)
+    SpriteSet fire;             // FIRE: arch-vile flame on his target
     SpriteSet pickups[8];       // by PickupType
     Shader alphaTest;           // discard shader: depth-correct billboards
     bool valid;
@@ -45,6 +46,7 @@ const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic)
 const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long tic);
 const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long tic);
 const SpriteFrame *BallSpriteFrame(const GameSprites *gs, MobKind owner, long tic);
+const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic);
 
 // Doom rotation index for an entity facing entAngle viewed from a camera
 // at yaw camYawDeg (degrees; doom-coords angle CCW from east).
