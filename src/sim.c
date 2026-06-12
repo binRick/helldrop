@@ -22,6 +22,7 @@
 
 static bool PlanCurrentObjective(struct Sim *sim, const char *reason);
 static void DgSetState(struct Sim *sim, DGState st, const char *reason);
+static void DamageBarrel(struct Sim *sim, int idx, int dmg, int attackerMob);
 
 static void Snd(struct Sim *sim, int id, Vector2 pos)
 {
@@ -271,6 +272,7 @@ static Vector2 DoorCenter(const Sim *sim, int di)
 static void DoorUse(Sim *sim, int di)
 {
     Door *d = &sim->doors[di];
+    if (sim->tic < d->holdUntil) return;   // Hell's Hand holds it shut
     switch (d->state) {
     case DOOR_CLOSED:
         d->state = DOOR_OPENING;
@@ -584,7 +586,9 @@ static void LiftTick(Sim *sim, int li)
         if (l->floor <= l->lowFloor) {
             l->floor = l->lowFloor;
             l->state = LIFT_LOW;
-            l->timer = LIFT_WAIT_TICS;
+            // A recalled lift sulks at the bottom for the verb's hold time.
+            l->timer = LIFT_WAIT_TICS + (l->recalled ? DOOR_HOLD_TICS : 0);
+            l->recalled = false;
             Snd(sim, SND_PSTOP, SectorAnyPoint(sim, l->sector));
         }
         break;
@@ -1485,6 +1489,7 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
 
     // Doom's infighting rule: hurt by another monster, turn on it.
     // Same-species hits stay loyal (the projectile exemption, simplified).
+    // attackerMob: >=0 a monster, -1 Doom Guy, -2 the environment/player.
     if (attackerMob >= 0 && attackerMob != idx &&
         sim->mobs[attackerMob].kind != m->kind &&
         sim->mobs[attackerMob].state != MOB_DEAD) {
@@ -1498,7 +1503,7 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
                 StateLogEnd();
             }
         }
-    } else if (attackerMob < 0) {
+    } else if (attackerMob == -1) {
         m->targetMob = -1;   // retaliate at Doom Guy
     }
 
@@ -1510,7 +1515,7 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
         // a gibbed body is withdrawn from the arch-vile's bank for good.
         m->gibbed = (m->health <= -MOB_INFO[m->kind].health);
         Snd(sim, MOB_SND_DEATH[m->kind], m->pos);
-        if (attackerMob < 0) sim->kills++;
+        if (attackerMob == -1) sim->kills++;   // his kills, not the player's
         LogMobDeath(sim, m, attackerMob);
         DecayCorpses(sim);
         int drop = MOB_INFO[m->kind].drop;
@@ -1597,6 +1602,12 @@ static void FireHitscan(Sim *sim, int shooterMob, Vector2 from, float zFrom,
         float t = SegCircleT(from, end, sim->dg.pos, DG_RADIUS);
         if (t > 0.001f && t < tBest) { tBest = t; hitMob = -1; hitDG = true; }
     }
+    int hitBarrel = -1;
+    for (int i = 0; i < sim->barrelCount; i++) {
+        if (!sim->barrels[i].alive) continue;
+        float t = SegCircleT(from, end, sim->barrels[i].pos, 12.0f);
+        if (t > 0.001f && t < tBest) { tBest = t; hitBarrel = i; hitMob = -1; hitDG = false; }
+    }
 
     Vector2 hit = { from.x + (end.x - from.x)*tBest, from.y + (end.y - from.y)*tBest };
     float zTo = zFrom;
@@ -1606,6 +1617,7 @@ static void FireHitscan(Sim *sim, int shooterMob, Vector2 from, float zFrom,
 
     if (hitDG) DamageDG(sim, dmg, shooterMob);
     else if (hitMob >= 0) DamageMob(sim, hitMob, dmg, shooterMob);
+    else if (hitBarrel >= 0) DamageBarrel(sim, hitBarrel, dmg, shooterMob);
 }
 
 static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
@@ -1670,6 +1682,32 @@ static void RadiusBlast(Sim *sim, Vector2 pos, int maxDmg, int attackerMob)
         if (d < 0.0f) d = 0.0f;
         if (d < (float)maxDmg) DamageDG(sim, maxDmg - (int)d, attackerMob);
     }
+    for (int i = 0; i < sim->barrelCount; i++) {
+        if (!sim->barrels[i].alive) continue;
+        float d = Dist2D(pos, sim->barrels[i].pos) - 12.0f;
+        if (d < 0.0f) d = 0.0f;
+        if (d < (float)maxDmg) DamageBarrel(sim, i, maxDmg - (int)d, attackerMob);
+    }
+}
+
+// Barrels chain: the blast keeps the original attacker's attribution.
+static void DamageBarrel(Sim *sim, int idx, int dmg, int attackerMob)
+{
+    Barrel *b = &sim->barrels[idx];
+    if (!b->alive) return;
+    b->health -= dmg;
+    if (b->health > 0) return;
+    b->alive = false;
+    PushBoom(sim, BOOM_ROCKET, b->pos, b->z + 20.0f);
+    Snd(sim, SND_BAREXP, b->pos);
+    if (StateLogEnabled()) {
+        StateLogBegin("barrel_explode");
+        StateLogInt("tic", sim->tic);
+        StateLogFloat("x", b->pos.x);
+        StateLogFloat("y", b->pos.y);
+        StateLogEnd();
+    }
+    RadiusBlast(sim, b->pos, 128, attackerMob);   // vanilla barrel blast
 }
 
 static void ProjTick(Sim *sim, Proj *p)
@@ -1696,6 +1734,13 @@ static void ProjTick(Sim *sim, Proj *p)
         if (t < tBest) { tBest = t; hitMob = -1; hitDG = true; }
     }
 
+    int hitBarrel = -1;
+    for (int i = 0; i < sim->barrelCount; i++) {
+        if (!sim->barrels[i].alive) continue;
+        float t = SegCircleT(p->pos, next, sim->barrels[i].pos, 16.0f);
+        if (t < tBest) { tBest = t; hitBarrel = i; hitMob = -1; hitDG = false; }
+    }
+
     bool exploded = (tBest < 1.0f);
     Vector2 hitPos = { p->pos.x + (next.x - p->pos.x)*tBest,
                        p->pos.y + (next.y - p->pos.y)*tBest };
@@ -1714,6 +1759,7 @@ static void ProjTick(Sim *sim, Proj *p)
     int dmg = (SimRandom(sim)%8 + 1) * p->damageMult;
     if (hitDG) DamageDG(sim, dmg, p->ownerMob);
     else if (hitMob >= 0) DamageMob(sim, hitMob, dmg, p->ownerMob);
+    else if (hitBarrel >= 0) DamageBarrel(sim, hitBarrel, dmg, p->ownerMob);
     if (p->isRocket) {
         PushBoom(sim, BOOM_ROCKET, hitPos, p->z);
         Snd(sim, SND_BAREXP, hitPos);
@@ -2986,6 +3032,15 @@ static void SpawnMapThings(Sim *sim)
         const Thing *t = &map->things[i];
         if (t->flags & 0x10) continue;
         if (!(t->flags & 0x02)) continue;   // not present at Hurt-Me-Plenty
+        if (t->type == 2035 && sim->barrelCount < BARRELS_MAX) {
+            bool onMap = false;
+            float fh = SimFloorAtPoint(sim, t->x, t->y, &onMap);
+            if (onMap) {
+                sim->barrels[sim->barrelCount++] = (Barrel){
+                    .alive = true, .pos = { t->x, t->y }, .z = fh, .health = 20 };
+            }
+            continue;
+        }
         bool placed = false;
         for (int k = 0; k < MK_COUNT && !placed; k++) {
             if (MOB_INFO[k].ednum != t->type) continue;
@@ -3005,8 +3060,93 @@ static void SpawnMapThings(Sim *sim)
             placed = true;
         }
     }
-    TraceLog(LOG_INFO, "SIM: spawned %d monsters, %d pickups from map things",
-             mobs, pickups);
+    TraceLog(LOG_INFO, "SIM: spawned %d monsters, %d pickups, %d barrels "
+             "from map things", mobs, pickups, sim->barrelCount);
+}
+
+// --------------------------------------------------------- hell's hand
+
+static bool VerbPay(Sim *sim, VerbKind vk, int cost, const char *what,
+                    VerbResult *out)
+{
+    if (sim->tic < sim->verbReadyTic[vk]) { *out = VERB_COOLDOWN; return false; }
+    if (sim->souls < (float)cost) { *out = VERB_NO_SOULS; return false; }
+    sim->souls -= (float)cost;
+    sim->soulsSpent += cost;
+    sim->verbReadyTic[vk] = sim->tic + VERB_COOLDOWN_TICS;
+    if (StateLogEnabled()) {
+        StateLogBegin("verb");
+        StateLogInt("tic", sim->tic);
+        StateLogStr("what", what);
+        StateLogInt("cost", cost);
+        StateLogFloat("souls", sim->souls);
+        StateLogEnd();
+    }
+    *out = VERB_OK;
+    return true;
+}
+
+VerbResult SimSlamMover(Sim *sim, float x, float y, int *costOut)
+{
+    Vector2 p = { x, y };
+    int door = -1, lift = -1;
+    float bestDoor = VERB_RANGE, bestLift = VERB_RANGE;
+    for (int i = 0; i < sim->doorCount; i++) {
+        float d = Dist2D(DoorCenter(sim, i), p);
+        if (d < bestDoor) { bestDoor = d; door = i; }
+    }
+    for (int i = 0; i < sim->liftCount; i++) {
+        if (sim->lifts[i].riser || sim->lifts[i].stayLow) continue;
+        float d = Dist2D(SectorAnyPoint(sim, sim->lifts[i].sector), p);
+        if (d < bestLift) { bestLift = d; lift = i; }
+    }
+    VerbResult res;
+    if (lift >= 0 && (door < 0 || bestLift < bestDoor)) {
+        if (costOut) *costOut = VERB_LIFT_COST;
+        if (!VerbPay(sim, VERB_LIFT, VERB_LIFT_COST, "lift_recall", &res)) return res;
+        Lift *l = &sim->lifts[lift];
+        l->recalled = true;
+        if (l->state == LIFT_UP || l->state == LIFT_RISING) {
+            l->state = LIFT_DOWN;
+            Snd(sim, SND_PSTART, SectorAnyPoint(sim, l->sector));
+        } else if (l->state == LIFT_LOW) {
+            l->timer += DOOR_HOLD_TICS;
+            l->recalled = false;
+        }
+        return VERB_OK;
+    }
+    if (door >= 0) {
+        if (costOut) *costOut = VERB_DOOR_COST;
+        if (!VerbPay(sim, VERB_DOOR, VERB_DOOR_COST, "door_slam", &res)) return res;
+        Door *d = &sim->doors[door];
+        d->holdUntil = sim->tic + DOOR_HOLD_TICS;
+        if (d->state == DOOR_OPEN || d->state == DOOR_OPENING) {
+            d->state = DOOR_CLOSING;
+            d->stayOpen = false;
+            Snd(sim, SND_DORCLS, DoorCenter(sim, door));
+            LogDoorEvent(sim, door, "slammed");
+        }
+        return VERB_OK;
+    }
+    return VERB_NO_TARGET;
+}
+
+VerbResult SimDetonateBarrel(Sim *sim, float x, float y)
+{
+    Vector2 p = { x, y };
+    int best = -1;
+    float bestD = VERB_RANGE;
+    for (int i = 0; i < sim->barrelCount; i++) {
+        if (!sim->barrels[i].alive) continue;
+        float d = Dist2D(sim->barrels[i].pos, p);
+        if (d < bestD) { bestD = d; best = i; }
+    }
+    if (best < 0) return VERB_NO_TARGET;
+    VerbResult res;
+    if (!VerbPay(sim, VERB_BARREL, VERB_BARREL_COST, "barrel_detonate", &res))
+        return res;
+    DamageBarrel(sim, best, 999, -2);   // -2: the player's hand, not his
+    return VERB_OK;
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -3101,6 +3241,7 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
         StateLogInt("waypoints", sim->dg.wpCount);
         StateLogInt("mobs", sim->mobCount);
         StateLogInt("pickups", sim->pickupCount);
+        StateLogInt("barrels", sim->barrelCount);
         StateLogEnd();
     }
     return true;

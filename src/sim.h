@@ -61,7 +61,34 @@ typedef struct Lift {
     int timer;                // tics left waiting at the bottom
     bool stayLow;             // one-shot floor-lower barriers never rise
     bool riser;               // floor-raise targets: start low, rise once
+    bool recalled;            // Hell's Hand: extra hold at the bottom
 } Lift;
+
+// Exploding barrels (thing 2035): shootable, chain-reacting, and remotely
+// detonable by the player.
+typedef struct Barrel {
+    bool alive;
+    Vector2 pos;
+    float z;
+    int health;
+} Barrel;
+
+#define BARRELS_MAX 64
+
+// Hell's Hand: environmental micro-spends. Costs in souls; each verb has
+// its own cooldown so it's seasoning, not a stunlock engine (DESIGN.md).
+#define VERB_DOOR_COST 15
+#define VERB_LIFT_COST 20
+#define VERB_BARREL_COST 30
+#define VERB_RANGE 140.0f
+#define VERB_COOLDOWN_TICS 420   // 12s
+#define DOOR_HOLD_TICS 105       // 3s
+
+typedef enum VerbResult {
+    VERB_OK, VERB_NO_SOULS, VERB_NO_TARGET, VERB_COOLDOWN
+} VerbResult;
+
+typedef enum VerbKind { VERB_DOOR, VERB_LIFT, VERB_BARREL, VERB_KINDS } VerbKind;
 
 typedef struct Door {
     int sector;
@@ -70,6 +97,7 @@ typedef struct Door {
     float speed;            // units per tic: 2 vanilla, 8 blaze
     DoorState state;
     int timer;              // tics left while OPEN before auto-close
+    long holdUntil;         // Hell's Hand: his Use is denied until this tic
     bool stayOpen;          // D1-type doors never auto-close
     bool locked;            // key door; v1 sim opens it anyway, logged once
     bool lockLogged;
@@ -269,6 +297,9 @@ typedef struct Sim {
     DoomGuy dg;
     Mob mobs[MOBS_MAX];
     int mobCount;           // compact prefix; corpses stay in the array
+    Barrel barrels[BARRELS_MAX];
+    int barrelCount;
+    long verbReadyTic[VERB_KINDS];   // Hell's Hand cooldowns
     Proj projs[PROJS_MAX];
     Pickup pickups[PICKUPS_MAX];
     int pickupCount;
@@ -304,6 +335,11 @@ bool SimDrop(Sim *sim, MobKind kind, float x, float y);
 // Player verb: pay souls and drop a monster. Out of his sight: instant.
 // In his sight: HOT_DROP_MULT price and a telegraphed delayed spawn.
 DropResult SimTryDrop(Sim *sim, MobKind kind, float x, float y);
+// Hell's Hand: slam/hold the nearest door, or recall the nearest lift,
+// within VERB_RANGE of the point. Picks whichever mover is closest.
+VerbResult SimSlamMover(Sim *sim, float x, float y, int *costOut);
+// Hell's Hand: detonate the nearest barrel within VERB_RANGE.
+VerbResult SimDetonateBarrel(Sim *sim, float x, float y);
 // Price of dropping `kind` at a point right now; *hot reports the
 // line-of-sight premium. (Non-const: the sight check uses scratch stamps.)
 int SimDropCost(Sim *sim, MobKind kind, float x, float y, bool *hot);

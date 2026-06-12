@@ -32,6 +32,7 @@ typedef struct GameSprites {
     SpriteSet player;
     SpriteSet ball[2];          // BAL1 (imp), BAL2 (caco)
     SpriteSet missile;          // MISL: his rocket + its explosion frames
+    SpriteSet barrel;           // BAR1: exploding barrels
     SpriteSet fire;             // FIRE: arch-vile flame on his target
     SpriteSet pickups[PK_COUNT];
     Shader alphaTest;           // discard shader: depth-correct billboards
@@ -49,6 +50,7 @@ const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long t
 const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long tic);
 const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long age);
 const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic);
+const SpriteFrame *BarrelSpriteFrame(const GameSprites *gs, long tic);
 
 // Doom rotation index for an entity facing entAngle viewed from a camera
 // at yaw camYawDeg (degrees; doom-coords angle CCW from east).

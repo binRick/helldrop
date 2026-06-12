@@ -100,6 +100,7 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
     SpriteSetLoad(&gs->missile, wad, "MISL", pal);
+    SpriteSetLoad(&gs->barrel, wad, "BAR1", pal);
     SpriteSetLoad(&gs->fire, wad, "FIRE", pal);
     for (int p = 0; p < PK_COUNT; p++) {
         SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal);
@@ -119,6 +120,7 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
     SpriteSetUnload(&gs->missile);
+    SpriteSetUnload(&gs->barrel);
     SpriteSetUnload(&gs->fire);
     for (int p = 0; p < PK_COUNT; p++) SpriteSetUnload(&gs->pickups[p]);
     if (gs->alphaTest.id != 0) UnloadShader(gs->alphaTest);
@@ -221,6 +223,15 @@ const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long ag
     int i = (int)(age/4);
     if (i < 0 || i > 2) return NULL;
     return Pick(set, seq[i]);
+}
+
+const SpriteFrame *BarrelSpriteFrame(const GameSprites *gs, long tic)
+{
+    if (!gs->barrel.any) return NULL;
+    if (gs->barrel.frames[1].present) {
+        return Pick(&gs->barrel, (tic/8) % 2 ? 'B' : 'A');
+    }
+    return Pick(&gs->barrel, 'A');
 }
 
 const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic)

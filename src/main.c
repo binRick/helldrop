@@ -404,6 +404,21 @@ static void DrawTracers(const Sim *sim)
     }
 }
 
+static void DrawBarrels(const Sim *sim, const GameSprites *gs, Camera3D cam)
+{
+    for (int i = 0; i < sim->barrelCount; i++) {
+        const Barrel *b = &sim->barrels[i];
+        if (!b->alive) continue;
+        const SpriteFrame *f = gs->valid ? BarrelSpriteFrame(gs, sim->tic) : NULL;
+        Vector3 base = { b->pos.x, b->z, -b->pos.y };
+        if (f) {
+            DrawSpriteBillboard(cam, f, 0, base, WHITE);
+        } else {
+            DrawCylinder(base, 11.0f, 9.0f, 34.0f, 10, (Color){ 90, 140, 90, 255 });
+        }
+    }
+}
+
 static void DrawPickups(const Sim *sim, const GameSprites *gs, Camera3D cam)
 {
     for (int i = 0; i < sim->pickupCount; i++) {
@@ -784,6 +799,11 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
     DrawTextShadowed("WASD pan  RMB drag  wheel zoom  Q/E rotate  Z/X tilt  "
                      "R view  G restart  ESC quit",
                      12, y, 14, GRAY);
+    y += 18;
+    DrawTextShadowed(TextFormat("HELL'S HAND:  F slam door %d / recall lift %d"
+                                "   V detonate barrel %d",
+                                VERB_DOOR_COST, VERB_LIFT_COST, VERB_BARREL_COST),
+                     12, y, 14, (Color){ 230, 140, 90, 255 });
 
     if (sim->dg.state == DG_EXITED || sim->dg.state == DG_DEAD) {
         bool won = (sim->dg.state == DG_DEAD);
@@ -1085,6 +1105,42 @@ int main(int argc, char **argv)
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);
+        if (groundOk && IsKeyPressed(KEY_F)) {
+            int cost = 0;
+            switch (SimSlamMover(&sim, ground.x, ground.y, &cost)) {
+            case VERB_OK: break;
+            case VERB_NO_SOULS:
+                snprintf(dropMsg, sizeof(dropMsg), "NOT ENOUGH SOULS (%d)", cost);
+                dropMsgFrames = 80;
+                break;
+            case VERB_NO_TARGET:
+                snprintf(dropMsg, sizeof(dropMsg), "NO DOOR OR LIFT THERE");
+                dropMsgFrames = 80;
+                break;
+            case VERB_COOLDOWN:
+                snprintf(dropMsg, sizeof(dropMsg), "HELL'S HAND IS RESTING");
+                dropMsgFrames = 80;
+                break;
+            }
+        }
+        if (groundOk && IsKeyPressed(KEY_V)) {
+            switch (SimDetonateBarrel(&sim, ground.x, ground.y)) {
+            case VERB_OK: break;
+            case VERB_NO_SOULS:
+                snprintf(dropMsg, sizeof(dropMsg), "NOT ENOUGH SOULS (%d)",
+                         VERB_BARREL_COST);
+                dropMsgFrames = 80;
+                break;
+            case VERB_NO_TARGET:
+                snprintf(dropMsg, sizeof(dropMsg), "NO BARREL THERE");
+                dropMsgFrames = 80;
+                break;
+            case VERB_COOLDOWN:
+                snprintf(dropMsg, sizeof(dropMsg), "HELL'S HAND IS RESTING");
+                dropMsgFrames = 80;
+                break;
+            }
+        }
         if (groundOk && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             switch (SimTryDrop(&sim, selectedKind, ground.x, ground.y)) {
             case DROP_OK:
@@ -1113,6 +1169,23 @@ int main(int argc, char **argv)
             SimTick(&sim);
             // Dev smoke test: periodically drop a squad just ahead of him so
             // combat/infighting/drops exercise without a human at the mouse.
+            if (opt.autodrop && sim.tic >= 400 && sim.tic % 400 == 0) {
+                // Exercise Hell's Hand: "click" the nearest barrel and the
+                // nearest door sector to him (cooldowns self-gate).
+                int nb = -1;
+                float nbd = 1e9f;
+                for (int b = 0; b < sim.barrelCount; b++) {
+                    if (!sim.barrels[b].alive) continue;
+                    float dx = sim.barrels[b].pos.x - sim.dg.pos.x;
+                    float dy = sim.barrels[b].pos.y - sim.dg.pos.y;
+                    if (dx*dx + dy*dy < nbd) { nbd = dx*dx + dy*dy; nb = b; }
+                }
+                if (nb >= 0) {
+                    SimDetonateBarrel(&sim, sim.barrels[nb].pos.x,
+                                      sim.barrels[nb].pos.y);
+                }
+                SimSlamMover(&sim, sim.dg.pos.x, sim.dg.pos.y, NULL);
+            }
             if (opt.autodrop && sim.tic >= 250 && sim.tic % 250 == 0) {
                 // Odd waves bring an arch-vile to bank the previous wave's
                 // corpses — the smoke test for resurrection.
@@ -1144,6 +1217,7 @@ int main(int argc, char **argv)
         // Billboards go through the alpha-test shader so they write depth
         // like opaque geometry: no sorting needed, no halo artifacts.
         if (gsprites.valid) BeginShaderMode(gsprites.alphaTest);
+        DrawBarrels(&sim, &gsprites, cam);
         DrawPickups(&sim, &gsprites, cam);
         DrawMobs(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
         DrawProjectiles(&sim, simAlpha, &gsprites, cam);

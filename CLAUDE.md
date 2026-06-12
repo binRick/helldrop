@@ -23,8 +23,11 @@ Full design rationale and roadmap: `DESIGN.md`.
 - `--selftest` — loads the map, renders 60 frames, writes `selftest.png`,
   exits 0. Combine with `--turbo 8` to screenshot mid-simulation. Use this
   (then Read the png) to verify changes without user interaction.
-- In-game: G restarts the sim (deterministic — same playout). 1–5 select a
-  monster, LMB drops it at the cursor. Drops cost souls (the Pain Tithe:
+- In-game: G restarts the sim (deterministic — same playout). 1–6 select a
+  monster, LMB drops it at the cursor. **Hell's Hand** (each on a 12s
+  cooldown): F slams/holds the door — or recalls the lift — nearest the
+  cursor (15/20 souls); V detonates the nearest barrel (30 souls; barrels
+  are live entities, shootable, chain-reacting). Drops cost souls (the Pain Tithe:
   base drip ramps 4→10/s with his progress toward the exit, +1 soul per
   point of damage dealt to him, no refund for healing he picks up). Drops
   inside his line of sight cost ×1.5 and telegraph for 1.5s before
