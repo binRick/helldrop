@@ -15,6 +15,12 @@ Full design rationale and roadmap: `DESIGN.md`.
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —
   keeps their terminal visible).
+- Default launch is the **campaign** ("Knee-Deep in His Blood"): E1M1→E1M8
+  with the bestiary unlocking per level (`UnlockMaskFor`); win + SPACE
+  advances, progress persists in `helldrop.sav` (gitignored). Killing him
+  in a secret sector (special 9) on E1M3 routes through E1M9. `--map` pins
+  a single level with everything unlocked — use it for ALL testing, since
+  campaign mode reads the save file (baselines: `--map E1M1`).
 - Binary: `Helldrop.app/Contents/MacOS/helldrop`. Flags: `--wad <path>`,
   `--map E1M2`, `--no-log`, `--exit-after <frames>`, `--turbo <N>` (sim speed
   multiplier, great for fast AI testing), `--autodrop` (scripted monster
