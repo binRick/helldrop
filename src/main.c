@@ -322,6 +322,15 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
         const Mob *m = &sim->mobs[i];
         float r = MobRadius(m->kind);
         Vector3 p = MobRenderPos(m, alpha);
+        if (m->state == MOB_DEAD) {
+            // Blood pools out beneath the corpse over the first second.
+            float age = (float)(sim->tic - m->deathTic);
+            float pr = r*1.25f*fminf(1.0f, age/35.0f);
+            if (pr > 1.0f) {
+                DrawCylinder((Vector3){ p.x, p.y + 0.4f, p.z }, pr, pr, 0.4f,
+                             12, (Color){ 88, 14, 14, 255 });
+            }
+        }
         const SpriteFrame *f = gs->valid ? MobSpriteFrame(gs, m, sim->tic) : NULL;
         if (f) {
             // Spectres render as a dark ghost of the pinky sprite.
@@ -797,6 +806,55 @@ static void SetupView(ViewState *vs, const DoomMap *map)
     ViewReset(vs);
     float diag = sqrtf(extentX*extentX + extentY*extentY);
     rlSetClipPlanes(1.0, CAM_DIST + 2.0*diag);
+}
+
+// ------------------------------------------------------------- screen melt
+
+// The classic Doom wipe: the old frame hangs as columns that fall away,
+// staggered and accelerating, revealing the new scene beneath.
+#define MELT_COLS 160
+
+typedef struct Melt {
+    Texture2D tex;
+    int y[MELT_COLS];
+    bool active;
+} Melt;
+
+static void MeltStart(Melt *m)
+{
+    if (m->active) return;
+    Image img = LoadImageFromScreen();
+    if (m->tex.id != 0) UnloadTexture(m->tex);
+    m->tex = LoadTextureFromImage(img);
+    UnloadImage(img);
+    int delay = 0;
+    for (int i = 0; i < MELT_COLS; i++) {
+        delay += GetRandomValue(-1, 1);
+        if (delay < 0) delay = 0;
+        if (delay > 15) delay = 15;
+        m->y[i] = -delay*12;
+    }
+    m->active = true;
+}
+
+static void MeltDraw(Melt *m)
+{
+    if (!m->active) return;
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    float srcW = (float)m->tex.width/MELT_COLS;
+    float dstW = (float)sw/MELT_COLS;
+    bool done = true;
+    for (int i = 0; i < MELT_COLS; i++) {
+        m->y[i] += 16;
+        int y = (m->y[i] < 0) ? 0 : m->y[i];
+        if (y < sh) done = false;
+        else continue;
+        DrawTexturePro(m->tex,
+                       (Rectangle){ i*srcW, 0, srcW, (float)m->tex.height },
+                       (Rectangle){ i*dstW, (float)y, dstW, (float)sh },
+                       (Vector2){ 0, 0 }, 0.0f, WHITE);
+    }
+    if (done) m->active = false;
 }
 
 // ------------------------------------------------------------- campaign
@@ -1441,6 +1499,8 @@ int main(int argc, char **argv)
     bool campaignComplete = false;
     unsigned unlocked = campaign ? UnlockMaskFor(curMap) : 0xFFFFFFFFu;
     if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
+    Melt melt = { 0 };
+    SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
     while (!WindowShouldClose()) {
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
@@ -1449,6 +1509,7 @@ int main(int argc, char **argv)
 
         if (IsKeyPressed(KEY_G)) {
             LogInput("sim_restart");
+            MeltStart(&melt);
             SimFree(&sim);
             SimInit(&sim, &map, &lm);
             simAcc = 0.0;
@@ -1492,6 +1553,7 @@ int main(int argc, char **argv)
                 else advance = true;
             }
             if (advance) {
+                MeltStart(&melt);
                 snprintf(curMap, sizeof(curMap), "%s", next);
                 CampaignSave(curMap);
                 if (!ReloadLevel(&wad, curMap, &map, &lm, &sim, &thingHeights)) {
@@ -1503,6 +1565,7 @@ int main(int argc, char **argv)
                 if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
                 simAcc = 0.0;
                 intentPrev[0] = '\0';
+                SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
                 continue;
             }
         }
@@ -1713,6 +1776,7 @@ int main(int argc, char **argv)
                              GetScreenHeight() - 110, 24,
                              (Color){ 255, 80, 70, 255 });
         }
+        MeltDraw(&melt);
         EndDrawing();
 
         if (frame % 12 == 0) LogSnapshot(&vs, &sim);
@@ -1732,6 +1796,7 @@ int main(int argc, char **argv)
 
     LogShutdown(frame, sim.tic);
     StateLogClose();
+    if (melt.tex.id != 0) UnloadTexture(melt.tex);
     UnloadRenderTexture(doomcamRT);
     GameAudioUnload(&gaudio);
     CloseAudioDevice();
