@@ -22,4 +22,9 @@ typedef struct DoomHud {
 bool DoomHudLoad(DoomHud *hud, const Wad *wad);   // false = nothing usable
 void DoomHudUnload(DoomHud *hud);
 
+// Shared decoder pieces (sprites use the same picture format).
+bool DoomLoadPalette(const Wad *wad, unsigned char pal[768]);
+bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
+                        const unsigned char *pal, Texture2D *out);
+
 #endif

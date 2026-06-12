@@ -23,6 +23,23 @@
 static bool PlanCurrentObjective(struct Sim *sim, const char *reason);
 static void DgSetState(struct Sim *sim, DGState st, const char *reason);
 
+static void Snd(struct Sim *sim, int id, Vector2 pos)
+{
+    sim->sndEvents[sim->sndHead % SND_EVENTS_MAX] = (SndEvent){ id, pos };
+    sim->sndHead++;
+}
+
+// Per-kind voice lines: sight, pain, death, melee.
+static const int MOB_SND_SIGHT[MK_COUNT] = {
+    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
+};
+static const int MOB_SND_PAIN[MK_COUNT] = {
+    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN,
+};
+static const int MOB_SND_DEATH[MK_COUNT] = {
+    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH,
+};
+
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
 // melee/missile damage = (1dDie) * Mult; hitscan pellets each 5*(1d3).
 typedef struct MobInfo {
@@ -218,12 +235,28 @@ static void LogDoorEvent(const Sim *sim, int door, const char *action)
     StateLogEnd();
 }
 
+static Vector2 DoorCenter(const Sim *sim, int di)
+{
+    // Cheap stand-in for the door's position: any vertex of any line
+    // bordering its sector would do; use Doom Guy-independent map data.
+    int ds = sim->doors[di].sector;
+    for (int i = 0; i < sim->map->lineCount; i++) {
+        const Linedef *l = &sim->map->lines[i];
+        if (l->sideBack >= 0 && sim->map->sides[l->sideBack].sector == ds) {
+            Vector2 a = sim->map->verts[l->v1], b = sim->map->verts[l->v2];
+            return (Vector2){ (a.x + b.x)*0.5f, (a.y + b.y)*0.5f };
+        }
+    }
+    return sim->dg.pos;
+}
+
 static void DoorUse(Sim *sim, int di)
 {
     Door *d = &sim->doors[di];
     switch (d->state) {
     case DOOR_CLOSED:
         d->state = DOOR_OPENING;
+        Snd(sim, SND_DOROPN, DoorCenter(sim, di));
         if (d->locked && !d->lockLogged) {
             d->lockLogged = true;
             TraceLog(LOG_WARNING,
@@ -263,6 +296,7 @@ static void DoorTick(Sim *sim, int di)
                 d->timer = SIM_TICRATE;   // someone in the doorway: hold
             } else {
                 d->state = DOOR_CLOSING;
+                Snd(sim, SND_DORCLS, DoorCenter(sim, di));
                 LogDoorEvent(sim, di, "closing");
             }
         }
@@ -806,20 +840,21 @@ static void PruneRoute(Sim *sim)
 
 // ---------------------------------------------------------------- sight
 
-// A line blocks sight only when its two sides share no vertical opening
-// (solid wall, or a door whose CURRENT ceiling is shut).
-static bool LineBlocksSight(const Sim *sim, const Linedef *l)
+// Vertical opening a sight line must thread at this linedef (door panels
+// use their CURRENT ceiling). False = one-sided/solid: always blocks.
+static bool LineSightOpening(const Sim *sim, const Linedef *l,
+                             float *bottom, float *top)
 {
-    if (l->sideFront < 0 || l->sideBack < 0) return true;
+    if (l->sideFront < 0 || l->sideBack < 0) return false;
     int fs = sim->map->sides[l->sideFront].sector;
     int bs = sim->map->sides[l->sideBack].sector;
-    if (fs < 0 || bs < 0) return true;
+    if (fs < 0 || bs < 0) return false;
     int dfa = sim->sectorDoor[fs], dfb = sim->sectorDoor[bs];
     float ceilA = (dfa >= 0) ? sim->doors[dfa].ceil : sim->map->sectors[fs].ceilH;
     float ceilB = (dfb >= 0) ? sim->doors[dfb].ceil : sim->map->sectors[bs].ceilH;
-    float top = fminf(ceilA, ceilB);
-    float bottom = fmaxf(sim->map->sectors[fs].floorH, sim->map->sectors[bs].floorH);
-    return (top - bottom) < 8.0f;
+    *top = fminf(ceilA, ceilB);
+    *bottom = fmaxf(sim->map->sectors[fs].floorH, sim->map->sectors[bs].floorH);
+    return (*top - *bottom) >= 8.0f;
 }
 
 static float SegSegT(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
@@ -834,9 +869,12 @@ static float SegSegT(Vector2 a, Vector2 b, Vector2 c, Vector2 d)
     return t;
 }
 
-// Earliest sight-blocking wall along a->b as a fraction of the segment;
-// 1.0 means clear. Used for both vision and hitscan wall hits.
-static float SightT(Sim *sim, Vector2 a, Vector2 b)
+// Earliest wall hit along the 3D ray (a, za) -> (b, zb) as a fraction of
+// the segment; 1.0 means clear. At every crossed two-sided line the ray's
+// interpolated height must thread the vertical opening — ledge steps and
+// half-closed doors block exactly like real walls. Used for both vision
+// and hitscan wall clipping.
+static float SightT(Sim *sim, Vector2 a, float za, Vector2 b, float zb)
 {
     float best = 1.0f;
     sim->stamp++;
@@ -856,18 +894,23 @@ static float SightT(Sim *sim, Vector2 a, Vector2 b)
                 if (sim->lineStamp[li] == sim->stamp) continue;
                 sim->lineStamp[li] = sim->stamp;
                 const Linedef *l = &sim->map->lines[li];
-                if (!LineBlocksSight(sim, l)) continue;
                 float t = SegSegT(a, b, sim->map->verts[l->v1], sim->map->verts[l->v2]);
-                if (t < best) best = t;
+                if (t >= best) continue;
+                float bottom, top;
+                if (LineSightOpening(sim, l, &bottom, &top)) {
+                    float z = za + (zb - za)*t;
+                    if (z > bottom + 1.0f && z < top - 1.0f) continue;
+                }
+                best = t;
             }
         }
     }
     return best;
 }
 
-static bool SightClear(Sim *sim, Vector2 a, Vector2 b)
+static bool SightClearZ(Sim *sim, Vector2 a, float za, Vector2 b, float zb)
 {
-    return SightT(sim, a, b) >= 1.0f;
+    return SightT(sim, a, za, b, zb) >= 1.0f;
 }
 
 // ---------------------------------------------------------------- combat
@@ -911,19 +954,19 @@ static void SpawnPickup(Sim *sim, PickupType type, Vector2 pos, float z, bool dr
     }
 }
 
-static bool SightClear(Sim *sim, Vector2 a, Vector2 b);
+static bool SightClearZ(Sim *sim, Vector2 a, float za, Vector2 b, float zb);
 
 // Gunfire alerts monsters that can see the muzzle, or are close enough to
 // hear it through a wall. Without the sight gate, one shot rallies the whole
 // map — and pre-placed ambushes behind walls would never stay asleep.
-static void WakeNearby(Sim *sim, Vector2 pos, float radius)
+static void WakeNearby(Sim *sim, Vector2 pos, float z, float radius)
 {
     for (int i = 0; i < sim->mobCount; i++) {
         Mob *m = &sim->mobs[i];
         if (m->state == MOB_DEAD || m->awake) continue;
         float d = Dist2D(m->pos, pos);
         if (d > radius) continue;
-        if (d > 250.0f && !SightClear(sim, m->pos, pos)) continue;
+        if (d > 250.0f && !SightClearZ(sim, m->pos, m->z + 32.0f, pos, z)) continue;
         m->awake = true;
         if (m->state == MOB_IDLE) m->state = MOB_CHASE;
     }
@@ -974,6 +1017,8 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
     if (m->health <= 0) {
         m->state = MOB_DEAD;
         m->stateTics = 0;
+        m->deathTic = sim->tic;
+        Snd(sim, MOB_SND_DEATH[m->kind], m->pos);
         if (attackerMob < 0) sim->kills++;
         LogMobDeath(sim, m, attackerMob);
         int drop = MOB_INFO[m->kind].drop;
@@ -983,6 +1028,7 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
     if (SimRandom(sim) < MOB_INFO[m->kind].painChance) {
         m->state = MOB_PAIN;
         m->stateTics = 8;
+        Snd(sim, MOB_SND_PAIN[m->kind], m->pos);
     }
 }
 
@@ -1001,6 +1047,7 @@ static void DamageDG(Sim *sim, int dmg, int attackerMob)
         dg->armor -= saved;
     }
     dg->health -= dmg - saved;
+    if (dmg - saved >= 10 && dg->health > 0) Snd(sim, SND_PLPAIN, dg->pos);
     if (StateLogEnabled()) {
         StateLogBegin("dg_damage");
         StateLogInt("tic", sim->tic);
@@ -1013,6 +1060,8 @@ static void DamageDG(Sim *sim, int dmg, int attackerMob)
     }
     if (dg->health <= 0) {
         dg->health = 0;
+        dg->deathTic = sim->tic;
+        Snd(sim, SND_PLDETH, dg->pos);
         DgSetState(sim, DG_DEAD, "killed");
         if (StateLogEnabled()) {
             StateLogBegin("dg_death");
@@ -1027,16 +1076,21 @@ static void DamageDG(Sim *sim, int dmg, int attackerMob)
 }
 
 // One hitscan pellet from a shooter (shooterMob -1 = Doom Guy). Walls clip
-// the ray; the first body on the line eats it — including other monsters,
-// which is exactly how infights start.
+// the ray in 3D (the shot rises/falls toward the aim height); the first
+// body on the line eats it — including other monsters, which is exactly
+// how infights start.
 static void FireHitscan(Sim *sim, int shooterMob, Vector2 from, float zFrom,
-                        Vector2 at, float spreadDeg, int dmg)
+                        Vector2 at, float zAt, float spreadDeg, int dmg)
 {
     float aim = atan2f(at.y - from.y, at.x - from.x);
     float spread = ((float)(SimRandom(sim) - SimRandom(sim)) / 255.0f) * spreadDeg * DEG2RAD;
     float a = aim + spread;
     Vector2 end = { from.x + cosf(a)*HITSCAN_RANGE, from.y + sinf(a)*HITSCAN_RANGE };
-    float tWall = SightT(sim, from, end);
+    float targetDist = Dist2D(from, at);
+    float zEnd = (targetDist > 1.0f)
+                     ? zFrom + (zAt - zFrom)*(HITSCAN_RANGE/targetDist)
+                     : zFrom;
+    float tWall = SightT(sim, from, zFrom, end, zEnd);
 
     int hitMob = -1;
     bool hitDG = false;
@@ -1090,7 +1144,7 @@ static void ProjTick(Sim *sim, Proj *p)
     Vector2 next = { p->pos.x + p->vel.x, p->pos.y + p->vel.y };
     float nextZ = p->z + p->zVel;
 
-    float tWall = SightT(sim, p->pos, next);
+    float tWall = SightT(sim, p->pos, p->z, next, nextZ);
     float tBest = tWall;
     int hitMob = -1;
     bool hitDG = false;
@@ -1109,6 +1163,7 @@ static void ProjTick(Sim *sim, Proj *p)
         int dmg = (SimRandom(sim)%8 + 1) * p->damageMult;
         if (hitDG) DamageDG(sim, dmg, p->ownerMob);
         else if (hitMob >= 0) DamageMob(sim, hitMob, dmg, p->ownerMob);
+        Snd(sim, SND_FIRXPL, p->pos);
         p->alive = false;
         return;
     }
@@ -1183,6 +1238,7 @@ static void TouchPickups(Sim *sim)
         if (dg->bullets > 200) dg->bullets = 200;
         if (dg->shells > 50) dg->shells = 50;
         p->alive = false;
+        Snd(sim, (p->type == PK_SHOTGUN) ? SND_WPNUP : SND_ITEMUP, dg->pos);
         if (StateLogEnabled()) {
             StateLogBegin("pickup");
             StateLogInt("tic", sim->tic);
@@ -1223,6 +1279,7 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
     const MobInfo *inf = &MOB_INFO[m->kind];
     float dist = Dist2D(m->pos, tpos);
     if (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius) {
+        Snd(sim, (m->kind == MK_PINKY) ? SND_SGTATK : SND_CLAW, m->pos);
         int dmg = (SimRandom(sim)%inf->meleeDie + 1) * inf->meleeMult;
         if (targetIsDG) DamageDG(sim, dmg, idx);
         else DamageMob(sim, targetMob, dmg, idx);
@@ -1231,13 +1288,15 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
         // whiff, across a courtyard closer to half.
         int whiff = 55 + (int)(dist*0.07f);
         if (whiff > 130) whiff = 130;
+        Snd(sim, (inf->pellets > 1) ? SND_SHOTGUN : SND_PISTOL, m->pos);
         for (int p = 0; p < inf->pellets; p++) {
             if (SimRandom(sim) < whiff) continue;
             int dmg = (SimRandom(sim)%5 + 1) * 3;   // vanilla zombie bullet
-            FireHitscan(sim, idx, m->pos, m->z + 32.0f, tpos, 13.0f, dmg);
+            FireHitscan(sim, idx, m->pos, m->z + 32.0f, tpos, tz + 24.0f, 13.0f, dmg);
         }
-        WakeNearby(sim, m->pos, 500.0f);
+        WakeNearby(sim, m->pos, m->z + 32.0f, 500.0f);
     } else if (inf->hasMissile) {
+        Snd(sim, SND_FIRSHT, m->pos);
         SpawnProjectile(sim, idx, m->pos, m->z + 32.0f, tpos, tz + 24.0f,
                         inf->missileSpeed, inf->missileMult);
     }
@@ -1269,9 +1328,11 @@ static void MobTick(Sim *sim, int idx)
     case MOB_IDLE:
         if (((sim->tic + idx) & 7) == 0 && !dgGone &&
             Dist2D(m->pos, sim->dg.pos) < SIGHT_RANGE &&
-            SightClear(sim, m->pos, sim->dg.pos)) {
+            SightClearZ(sim, m->pos, m->z + 32.0f,
+                        sim->dg.pos, sim->dg.z + 32.0f)) {
             m->awake = true;
             m->state = MOB_CHASE;
+            Snd(sim, MOB_SND_SIGHT[m->kind], m->pos);
         }
         break;
     case MOB_PAIN:
@@ -1292,7 +1353,8 @@ static void MobTick(Sim *sim, int idx)
         bool melee = (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius);
         bool ranged = (inf->pellets > 0 || inf->hasMissile);
         if (m->attackCooldown <= 0 && (melee ||
-            (ranged && dist < 1100.0f && SightClear(sim, m->pos, tpos)))) {
+            (ranged && dist < 1100.0f &&
+             SightClearZ(sim, m->pos, m->z + 32.0f, tpos, tz + 24.0f)))) {
             // Doom-ish gate: the closer the target, the likelier the attack.
             int gate = melee ? 256 : 70 + (int)fmaxf(0.0f, 110.0f - dist*0.09f);
             if (SimRandom(sim) < gate) {
@@ -1532,7 +1594,7 @@ static int DgPickTarget(Sim *sim)
         if (m->state == MOB_DEAD) continue;
         float d = Dist2D(dg->pos, m->pos);
         if (d >= bestD) continue;
-        if (!SightClear(sim, dg->pos, m->pos)) continue;
+        if (!SightClearZ(sim, dg->pos, dg->z + DG_EYE, m->pos, m->z + 24.0f)) continue;
         bestD = d;
         best = i;
     }
@@ -1545,18 +1607,22 @@ static void DgFire(Sim *sim)
     Mob *t = &sim->mobs[dg->targetMob];
     if (dg->weapon == WPN_SHOTGUN) {
         dg->shells--;
+        Snd(sim, SND_SHOTGUN, dg->pos);
         for (int p = 0; p < 7; p++) {
             int dmg = (SimRandom(sim)%3 + 1) * 5;   // vanilla 5*(1d3) per pellet
-            FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, 6.0f, dmg);
+            FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
+                        6.0f, dmg);
         }
         dg->fireCooldown = 37;                       // vanilla shotgun cadence
     } else {
         dg->bullets--;
+        Snd(sim, SND_PISTOL, dg->pos);
         int dmg = (SimRandom(sim)%3 + 1) * 5;
-        FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, 2.5f, dmg);
+        FireHitscan(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
+                    2.5f, dmg);
         dg->fireCooldown = 10;                       // vanilla pistol cadence
     }
-    WakeNearby(sim, dg->pos, 800.0f);                // gunfire carries
+    WakeNearby(sim, dg->pos, dg->z + DG_EYE, 800.0f);   // gunfire carries
 }
 
 static void DgUpdateGround(Sim *sim)
@@ -1659,7 +1725,7 @@ static void DgFightTick(Sim *sim)
     if (dg->fireCooldown > 0) dg->fireCooldown--;
     bool hasAmmo = (dg->weapon == WPN_SHOTGUN) ? dg->shells > 0 : dg->bullets > 0;
     if (dg->fireCooldown <= 0 && hasAmmo && fabsf(DgFacingErr(dg, tpos)) < 8.0f &&
-        SightClear(sim, dg->pos, tpos)) {
+        SightClearZ(sim, dg->pos, dg->z + DG_EYE, tpos, t->z + 24.0f)) {
         DgFire(sim);
     }
 
@@ -1749,7 +1815,9 @@ static void DgTick(Sim *sim)
     }
     case DG_FIGHT:
         if (dg->targetMob < 0 || sim->mobs[dg->targetMob].state == MOB_DEAD ||
-            !SightClear(sim, dg->pos, sim->mobs[dg->targetMob].pos)) {
+            !SightClearZ(sim, dg->pos, dg->z + DG_EYE,
+                         sim->mobs[dg->targetMob].pos,
+                         sim->mobs[dg->targetMob].z + 24.0f)) {
             if (++dg->noTargetTics >= 30) {
                 dg->noTargetTics = 0;
                 dg->targetMob = -1;
@@ -1850,6 +1918,7 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     bool onMap = false;
     float floorH = SimFloorAtPoint(sim, x, y, &onMap);
     if (!onMap) return -1;
+    if (playerDropped) Snd(sim, SND_TELEPT, (Vector2){ x, y });
     int idx = sim->mobCount++;
     Mob *m = &sim->mobs[idx];
     *m = (Mob){ 0 };
@@ -1903,8 +1972,10 @@ int SimDropCost(Sim *sim, MobKind kind, float x, float y, bool *hot)
     if (sim->dg.state != DG_DEAD && sim->dg.state != DG_EXITED &&
         sim->dg.state != DG_NO_GOAL) {
         Vector2 p = { x, y };
-        inSight = Dist2D(sim->dg.pos, p) < SIGHT_RANGE &&
-                  SightClear(sim, sim->dg.pos, p);
+        bool onMap = false;
+        float pz = SimFloorAtPoint(sim, x, y, &onMap);
+        inSight = onMap && Dist2D(sim->dg.pos, p) < SIGHT_RANGE &&
+                  SightClearZ(sim, sim->dg.pos, sim->dg.z + DG_EYE, p, pz + 32.0f);
     }
     if (hot) *hot = inSight;
     float c = (float)SimDropBaseCost(kind);
@@ -1966,7 +2037,9 @@ static void PendingTick(Sim *sim)
 }
 
 // Map THINGS -> live monsters and pickup entities. Multiplayer-only things
-// (flag 0x10) are skipped; everything else spawns regardless of skill bits.
+// (flag 0x10) are skipped, and the vanilla skill filter applies at
+// Hurt-Me-Plenty (bit 0x02): spawning every skill's monsters made the
+// unaided baseline unwinnable. Inverted-difficulty selection comes later.
 static void SpawnMapThings(Sim *sim)
 {
     static const struct { int ednum; PickupType type; } PICKUP_THINGS[] = {
@@ -1979,6 +2052,7 @@ static void SpawnMapThings(Sim *sim)
     for (int i = 0; i < map->thingCount; i++) {
         const Thing *t = &map->things[i];
         if (t->flags & 0x10) continue;
+        if (!(t->flags & 0x02)) continue;   // not present at Hurt-Me-Plenty
         bool placed = false;
         for (int k = 0; k < MK_COUNT && !placed; k++) {
             if (MOB_INFO[k].ednum != t->type) continue;

@@ -15,7 +15,7 @@ static uint16_t ReadLE16(const unsigned char *p)
     return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-static bool LoadPalette(const Wad *wad, unsigned char pal[768])
+bool DoomLoadPalette(const Wad *wad, unsigned char pal[768])
 {
     int idx = WadFindLump(wad, "PLAYPAL", 0);
     if (idx < 0) return false;
@@ -28,13 +28,11 @@ static bool LoadPalette(const Wad *wad, unsigned char pal[768])
 
 // Decode one Doom picture-format ("patch") lump into RGBA. Hostile data is
 // only ever skipped, never trusted: every offset is bounds-checked.
-static bool PatchToTexture(const Wad *wad, const char *name,
-                           const unsigned char *pal, Texture2D *out)
+bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
+                        const unsigned char *pal, Texture2D *out)
 {
-    int idx = WadFindLump(wad, name, 0);
-    if (idx < 0) return false;
     int size = 0;
-    const unsigned char *d = WadLumpData(wad, idx, &size);
+    const unsigned char *d = WadLumpData(wad, lumpIndex, &size);
     if (!d || size < 8) return false;
 
     int w = ReadLE16(d);
@@ -80,11 +78,19 @@ static bool PatchToTexture(const Wad *wad, const char *name,
     return out->id != 0;
 }
 
+static bool PatchToTexture(const Wad *wad, const char *name,
+                           const unsigned char *pal, Texture2D *out)
+{
+    int idx = WadFindLump(wad, name, 0);
+    if (idx < 0) return false;
+    return DoomPatchToTexture(wad, idx, pal, out);
+}
+
 bool DoomHudLoad(DoomHud *hud, const Wad *wad)
 {
     memset(hud, 0, sizeof(*hud));
     unsigned char pal[768];
-    if (!LoadPalette(wad, pal)) return false;
+    if (!DoomLoadPalette(wad, pal)) return false;
 
     hud->hasStbar = PatchToTexture(wad, "STBAR", pal, &hud->stbar);
 

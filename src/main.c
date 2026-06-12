@@ -15,6 +15,8 @@
 #include "levelmesh.h"
 #include "sim.h"
 #include "doomgfx.h"
+#include "sprites.h"
+#include "sound.h"
 #include "statelog.h"
 
 #define HELLDROP_VERSION "0.1.0"
@@ -240,9 +242,15 @@ static Vector3 DgRenderPos(const Sim *sim, float alpha)
     return (Vector3){ x, z, -y };
 }
 
-static void DrawDoomGuy(const Sim *sim, float alpha)
+static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
+                        Camera3D cam, float camYaw)
 {
     Vector3 p = DgRenderPos(sim, alpha);
+    const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, &sim->dg, sim->tic) : NULL;
+    if (f) {
+        DrawSpriteBillboard(cam, f, SpriteRotation(sim->dg.angleDeg, camYaw), p, WHITE);
+        return;
+    }
     Vector3 feet = { p.x, p.y + DG_RADIUS, p.z };
     Vector3 head = { p.x, p.y + DG_HEIGHT - DG_RADIUS, p.z };
     Color body = (sim->dg.state == DG_EXITED) ? (Color){ 255, 220, 60, 255 }
@@ -295,42 +303,41 @@ static Vector3 MobRenderPos(const Mob *m, float alpha)
     return (Vector3){ x, z, -y };
 }
 
-static void DrawMobs(const Sim *sim, float alpha)
+static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
+                     Camera3D cam, float camYaw)
 {
     for (int i = 0; i < sim->mobCount; i++) {
         const Mob *m = &sim->mobs[i];
         float r = MobRadius(m->kind);
         Vector3 p = MobRenderPos(m, alpha);
-        if (m->state == MOB_DEAD) {
+        const SpriteFrame *f = gs->valid ? MobSpriteFrame(gs, m, sim->tic) : NULL;
+        if (f) {
+            DrawSpriteBillboard(cam, f, SpriteRotation(m->angleDeg, camYaw), p, WHITE);
+        } else if (m->state == MOB_DEAD) {
             DrawCylinder(p, r*0.9f, r*0.9f, 3.0f, 8, (Color){ 95, 42, 42, 255 });
-            continue;
-        }
-        Color c = MOB_COLORS[m->kind];
-        if (m->state == MOB_PAIN) c = (Color){ 255, 255, 255, 255 };
-        else if (m->state == MOB_ATTACK) {
-            c.r = (unsigned char)((c.r + 255)/2);   // brighten on windup
-            c.g = (unsigned char)(c.g*0.8f);
-            c.b = (unsigned char)(c.b*0.8f);
-        }
-        Color outline = { (unsigned char)(c.r/3), (unsigned char)(c.g/3),
-                          (unsigned char)(c.b/3), 255 };
-        if (MobIsFlyer(m->kind)) {
-            DrawSphere(p, r*0.85f, c);
-            DrawSphereWires(p, r*0.85f, 8, 8, outline);
         } else {
-            DrawCylinder(p, r*0.85f, r*0.85f, 42.0f, 10, c);
-            DrawCylinderWires(p, r*0.85f, r*0.85f, 42.0f, 10, outline);
+            Color c = MOB_COLORS[m->kind];
+            if (m->state == MOB_PAIN) c = (Color){ 255, 255, 255, 255 };
+            Color outline = { (unsigned char)(c.r/3), (unsigned char)(c.g/3),
+                              (unsigned char)(c.b/3), 255 };
+            if (MobIsFlyer(m->kind)) {
+                DrawSphere(p, r*0.85f, c);
+                DrawSphereWires(p, r*0.85f, 8, 8, outline);
+            } else {
+                DrawCylinder(p, r*0.85f, r*0.85f, 42.0f, 10, c);
+                DrawCylinderWires(p, r*0.85f, r*0.85f, 42.0f, 10, outline);
+            }
+            float a = m->angleDeg*DEG2RAD;
+            float zc = p.y + 28.0f;
+            DrawLine3D((Vector3){ p.x, zc, p.z },
+                       (Vector3){ p.x + cosf(a)*(r + 14.0f), zc,
+                                  p.z - sinf(a)*(r + 14.0f) }, RAYWHITE);
         }
-        float a = m->angleDeg*DEG2RAD;
-        float zc = p.y + 28.0f;
-        DrawLine3D((Vector3){ p.x, zc, p.z },
-                   (Vector3){ p.x + cosf(a)*(r + 14.0f), zc, p.z - sinf(a)*(r + 14.0f) },
-                   RAYWHITE);
         int maxHp = MobMaxHealth(m->kind);
-        if (m->health < maxHp) {
+        if (m->state != MOB_DEAD && m->health < maxHp) {
             float frac = (float)m->health/(float)maxHp;
             float w = 40.0f;
-            float top = p.y + 56.0f;
+            float top = p.y + 66.0f;
             DrawCube((Vector3){ p.x, top, p.z }, w, 3.0f, 3.0f,
                      (Color){ 60, 10, 10, 255 });
             DrawCube((Vector3){ p.x - w*(1.0f - frac)*0.5f, top, p.z },
@@ -339,7 +346,8 @@ static void DrawMobs(const Sim *sim, float alpha)
     }
 }
 
-static void DrawProjectiles(const Sim *sim, float alpha)
+static void DrawProjectiles(const Sim *sim, float alpha, const GameSprites *gs,
+                            Camera3D cam)
 {
     for (int i = 0; i < PROJS_MAX; i++) {
         const Proj *p = &sim->projs[i];
@@ -347,11 +355,17 @@ static void DrawProjectiles(const Sim *sim, float alpha)
         float x = p->prevPos.x + (p->pos.x - p->prevPos.x)*alpha;
         float y = p->prevPos.y + (p->pos.y - p->prevPos.y)*alpha;
         float z = p->prevZ + (p->z - p->prevZ)*alpha;
-        Color c = (p->ownerKind == MK_CACO) ? (Color){ 255, 60, 60, 255 }
-                                            : (Color){ 255, 140, 40, 255 };
-        DrawSphere((Vector3){ x, z, -y }, 7.0f, c);
-        DrawSphere((Vector3){ x - p->vel.x*0.5f, z, -(y - p->vel.y*0.5f) }, 4.0f,
-                   (Color){ c.r, (unsigned char)(c.g/2), 20, 160 });
+        const SpriteFrame *f = gs->valid ? BallSpriteFrame(gs, p->ownerKind, sim->tic)
+                                         : NULL;
+        if (f) {
+            // Balls anchor centered, not feet-planted: drop the base by half.
+            float h = (float)f->tex[0].height;
+            DrawSpriteBillboard(cam, f, 0, (Vector3){ x, z - h*0.5f, -y }, WHITE);
+        } else {
+            Color c = (p->ownerKind == MK_CACO) ? (Color){ 255, 60, 60, 255 }
+                                                : (Color){ 255, 140, 40, 255 };
+            DrawSphere((Vector3){ x, z, -y }, 7.0f, c);
+        }
     }
 }
 
@@ -366,11 +380,18 @@ static void DrawTracers(const Sim *sim)
     }
 }
 
-static void DrawPickups(const Sim *sim)
+static void DrawPickups(const Sim *sim, const GameSprites *gs, Camera3D cam)
 {
     for (int i = 0; i < sim->pickupCount; i++) {
         const Pickup *p = &sim->pickups[i];
         if (!p->alive) continue;
+        const SpriteFrame *f = gs->valid ? PickupSpriteFrame(gs, p->type, sim->tic)
+                                         : NULL;
+        if (f) {
+            DrawSpriteBillboard(cam, f, 0, (Vector3){ p->pos.x, p->z, -p->pos.y },
+                                WHITE);
+            continue;
+        }
         Color c;
         switch (p->type) {
         case PK_STIM: case PK_MEDIKIT: c = (Color){ 80, 140, 255, 255 }; break;
@@ -955,6 +976,14 @@ int main(int argc, char **argv)
     }
     FaceState faceState = { .prevHealth = 100, .hpRef = 100, .hpRefFrames = 35 };
 
+    GameSprites gsprites = { 0 };
+    if (!GameSpritesLoad(&gsprites, &wad)) {
+        TraceLog(LOG_WARNING, "MAIN: no sprites in WAD, using shape renderer");
+    }
+    InitAudioDevice();
+    GameAudio gaudio = { 0 };
+    GameAudioLoad(&gaudio, &wad);
+
     long frame = 0;
     double simAcc = 0.0;
     MobKind selectedKind = MK_PINKY;
@@ -1022,17 +1051,23 @@ int main(int argc, char **argv)
         }
         float simAlpha = (float)(simAcc / SIM_TICTIME);
 
+        GameAudioDrain(&gaudio, &sim, (Vector2){ vs.target.x, -vs.target.z });
+
         BeginDrawing();
         ClearBackground((Color){ 12, 12, 14, 255 });
         BeginMode3D(cam);
         LevelMeshDraw(&lm);
         DrawDoors(&sim, simAlpha);
         DrawThings(&map, thingHeights);
-        DrawPickups(&sim);
         DrawRoute(&sim, simAlpha);
-        DrawMobs(&sim, simAlpha);
-        DrawProjectiles(&sim, simAlpha);
-        DrawDoomGuy(&sim, simAlpha);
+        // Billboards go through the alpha-test shader so they write depth
+        // like opaque geometry: no sorting needed, no halo artifacts.
+        if (gsprites.valid) BeginShaderMode(gsprites.alphaTest);
+        DrawPickups(&sim, &gsprites, cam);
+        DrawMobs(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
+        DrawProjectiles(&sim, simAlpha, &gsprites, cam);
+        DrawDoomGuy(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
+        if (gsprites.valid) EndShaderMode();
         DrawTracers(&sim);
         DrawPendingDrops(&sim, frame);
         bool cursorHot = false;
@@ -1092,6 +1127,9 @@ int main(int argc, char **argv)
 
     LogShutdown(frame, sim.tic);
     StateLogClose();
+    GameAudioUnload(&gaudio);
+    CloseAudioDevice();
+    GameSpritesUnload(&gsprites);
     DoomHudUnload(&hud);
     SimFree(&sim);
     free(thingHeights);

@@ -83,9 +83,28 @@ typedef struct Mob {
     int targetMob;          // infight target, -1 = Doom Guy
     int dodgeTics;          // blocked-path wiggle, Doom A_Chase style
     float dodgeDir;
+    long deathTic;          // when it died; drives the death animation
     bool awake;
     bool playerDropped;
 } Mob;
+
+// Sound events the sim emits and the presentation layer drains; keeps the
+// sim headless. `head` counts monotonically; readers keep their own cursor.
+typedef enum SimSnd {
+    SND_PISTOL, SND_SHOTGUN, SND_FIRSHT, SND_FIRXPL, SND_CLAW, SND_SGTATK,
+    SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
+    SND_POPAIN, SND_DMPAIN, SND_PLPAIN,
+    SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_PLDETH,
+    SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
+    SND_COUNT
+} SimSnd;
+
+#define SND_EVENTS_MAX 64
+
+typedef struct SndEvent {
+    int id;
+    Vector2 pos;
+} SndEvent;
 
 typedef struct Proj {
     bool alive;
@@ -145,6 +164,7 @@ typedef struct DoomGuy {
     bool hasShotgun;
     DGWeapon weapon;
     int fireCooldown;
+    long deathTic;          // when he died; drives the death animation
     int targetMob;          // current fight target, -1 none
     float strafeDir;        // +1/-1 orbit direction in FIGHT
     int noTargetTics;
@@ -199,6 +219,8 @@ typedef struct Sim {
     int pickupCount;
     Tracer tracers[TRACERS_MAX];
     int tracerHead;
+    SndEvent sndEvents[SND_EVENTS_MAX];
+    long sndHead;
     PendingDrop pending[PENDING_MAX];
     // The Pain Tithe: souls drip slowly and pour from damage dealt to him.
     float souls;

@@ -65,15 +65,27 @@ change** (`statelog.h` has the writer API).
   (IDLE/CHASE/ATTACK/PAIN/DEAD, sight+sound wake, blocked-path wiggle),
   hitscan with tracers, projectiles, the vanilla **infighting** retarget
   rule (different species only), corpses, pickups (he loots zombie clip
-  drops — Feeding the Slayer), and his weapon/ammo/armor sim. Doom Guy
-  unaided should usually clear the map population and exit; player drops
-  (`SimDrop`) are what kill him. Balance knobs live in `MOB_INFO`, the
-  monster whiff curve in `MobAttack`, and his cadence in `DgFire`.
+  drops — Feeding the Slayer), and his weapon/ammo/armor sim. Sight and
+  hitscan are height-aware: `SightT` interpolates the ray's z through every
+  crossed line's vertical opening, so ledge steps and half-open doors block
+  shots like real walls. Map things spawn at the Hurt-Me-Plenty skill
+  filter (0x02) — that's the tuned baseline. Doom Guy unaided should
+  usually clear the map population and exit; player drops are what kill
+  him. Balance knobs live in `MOB_INFO`, the monster whiff curve in
+  `MobAttack`, and his cadence in `DgFire`.
 - `src/doomgfx.c` — Doom picture-format (patch) decoder via PLAYPAL: the
   classic status bar (STBAR), mugshot faces (STFST/STFOUCH/STFEVL/STFDEAD),
   and big red digits (STTNUM). Every lump is optional with text fallbacks,
   so any IWAD works. The mugshot bloodies as the player wins — it IS the
   progress bar.
+- `src/sprites.c` — WAD sprites as billboards with the authentic 8-rotation
+  system (NAME+frame+rotation lumps, mirrored pairs), per-kind animation
+  tables (walk/attack/pain/death; death holds the corpse frame), and an
+  alpha-test discard shader so billboards depth-sort like opaque geometry.
+  Missing sets fall back to the capsule renderer per entity.
+- `src/sound.c` — DMX sound lumps -> raylib Sounds. The sim emits SndEvents
+  into a ring (`Snd()` in sim.c, headless/deterministic); GameAudioDrain
+  plays them with distance attenuation from the camera target.
 - `src/statelog.c` — NDJSON writer.
 - `src/main.c` — game loop, iso camera (pan/zoom/rotate), thing markers,
   Doom Guy capsule + route + door panel rendering, HUD.
