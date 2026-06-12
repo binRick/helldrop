@@ -27,6 +27,10 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
     [MK_REVENANT]   = { "SKEL", "ABCDEF", "JK",  'L', "LMNOPQ", NULL },
     [MK_BARON]      = { "BOSS", "ABCD",   "EFG", 'H', "IJKLMNO", NULL },
     [MK_ARCHVILE]   = { "VILE", "ABCDEF", "GHIJKLMNOP", 'Q', "RSTUVWXYZ", "[\\]" },
+    [MK_CHAINGUNNER]   = { "CPOS", "ABCD",   "EF",  'G', "HIJKLM", NULL },
+    [MK_HELLKNIGHT]    = { "BOS2", "ABCD",   "EFG", 'H', "IJKLMNO", NULL },
+    [MK_MANCUBUS]      = { "FATT", "ABCDEF", "GHI", 'J', "KLMNOPQRST", NULL },
+    [MK_PAINELEMENTAL] = { "PAIN", "ABC",    "DEF", 'G', "HIJKLM", NULL },
 };
 
 static const MobAnim PLAYER_ANIM = { "PLAY", "ABCD", "EF", 'G', "HIJKLMN", NULL };
@@ -104,6 +108,7 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
     SpriteSetLoad(&gs->baronBall, wad, "BAL7", pal);
+    SpriteSetLoad(&gs->fatShot, wad, "MANF", pal);
     SpriteSetLoad(&gs->tracer, wad, "FATB", pal);
     SpriteSetLoad(&gs->tracerBoom, wad, "FBXP", pal);
     SpriteSetLoad(&gs->missile, wad, "MISL", pal);
@@ -127,6 +132,7 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
     SpriteSetUnload(&gs->baronBall);
+    SpriteSetUnload(&gs->fatShot);
     SpriteSetUnload(&gs->tracer);
     SpriteSetUnload(&gs->tracerBoom);
     SpriteSetUnload(&gs->missile);
@@ -217,8 +223,10 @@ const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long ti
     }
     const SpriteSet *set = (p->ownerKind == MK_CACO) ? &gs->ball[1]
                          : (p->ownerKind == MK_REVENANT) ? &gs->tracer
-                         : (p->ownerKind == MK_BARON) ? &gs->baronBall
-                                                      : &gs->ball[0];
+                         : (p->ownerKind == MK_BARON ||
+                            p->ownerKind == MK_HELLKNIGHT) ? &gs->baronBall
+                         : (p->ownerKind == MK_MANCUBUS) ? &gs->fatShot
+                                                         : &gs->ball[0];
     if (!set->any) return NULL;
     if (set->frames[1].present) return Pick(set, (tic/4) % 2 ? 'B' : 'A');
     return Pick(set, 'A');

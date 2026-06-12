@@ -23,6 +23,8 @@
 static bool PlanCurrentObjective(struct Sim *sim, const char *reason);
 static void DgSetState(struct Sim *sim, DGState st, const char *reason);
 static void DamageBarrel(struct Sim *sim, int idx, int dmg, int attackerMob);
+static int SpawnMob(struct Sim *sim, MobKind kind, float x, float y,
+                    float angleDeg, bool awake, bool playerDropped);
 
 static void Snd(struct Sim *sim, int id, Vector2 pos)
 {
@@ -36,19 +38,34 @@ static const int MOB_SND_SIGHT[MK_COUNT] = {
     [MK_PINKY] = SND_SGTSIT, [MK_SPECTRE] = SND_SGTSIT, [MK_CACO] = SND_CACSIT,
     [MK_LOSTSOUL] = SND_SKLATK, [MK_REVENANT] = SND_SKESIT,
     [MK_BARON] = SND_BRSSIT, [MK_ARCHVILE] = SND_VILSIT,
+    [MK_CHAINGUNNER] = SND_POSIT, [MK_HELLKNIGHT] = SND_KNTSIT,
+    [MK_MANCUBUS] = SND_MANSIT, [MK_PAINELEMENTAL] = SND_PESIT,
 };
 static const int MOB_SND_PAIN[MK_COUNT] = {
     [MK_ZOMBIE] = SND_POPAIN, [MK_SHOTGUNGUY] = SND_POPAIN, [MK_IMP] = SND_POPAIN,
     [MK_PINKY] = SND_DMPAIN, [MK_SPECTRE] = SND_DMPAIN, [MK_CACO] = SND_DMPAIN,
     [MK_LOSTSOUL] = SND_DMPAIN, [MK_REVENANT] = SND_POPAIN,
     [MK_BARON] = SND_DMPAIN, [MK_ARCHVILE] = SND_VIPAIN,
+    [MK_CHAINGUNNER] = SND_POPAIN, [MK_HELLKNIGHT] = SND_DMPAIN,
+    [MK_MANCUBUS] = SND_MNPAIN, [MK_PAINELEMENTAL] = SND_PEPAIN,
 };
 static const int MOB_SND_DEATH[MK_COUNT] = {
     [MK_ZOMBIE] = SND_PODTH, [MK_SHOTGUNGUY] = SND_PODTH, [MK_IMP] = SND_BGDTH,
     [MK_PINKY] = SND_SGTDTH, [MK_SPECTRE] = SND_SGTDTH, [MK_CACO] = SND_CACDTH,
     [MK_LOSTSOUL] = SND_FIRXPL, [MK_REVENANT] = SND_SKEDTH,
     [MK_BARON] = SND_BRSDTH, [MK_ARCHVILE] = SND_VILDTH,
+    [MK_CHAINGUNNER] = SND_PODTH, [MK_HELLKNIGHT] = SND_KNTDTH,
+    [MK_MANCUBUS] = SND_MANDTH, [MK_PAINELEMENTAL] = SND_PEDTH,
 };
+
+static int CountLiveSouls(const Sim *sim)
+{
+    int n = 0;
+    for (int i = 0; i < sim->mobCount; i++) {
+        if (sim->mobs[i].kind == MK_LOSTSOUL && sim->mobs[i].state != MOB_DEAD) n++;
+    }
+    return n;
+}
 
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
 // melee/missile damage = (1dDie) * Mult; hitscan pellets each 5*(1d3).
@@ -94,6 +111,16 @@ static const MobInfo MOB_INFO[MK_COUNT] = {
     // The flame attack and resurrection are special-cased in MobTick.
     [MK_ARCHVILE]   = { "archvile",     64, 700, 20.0f, 3.0f,  10,
                         0.0f, 0, 0,  false, 0.0f, 0,  0, false, -1, 220 },
+    // Doom 2 heavies. Chaingunner bursts, mancubus volleys, and the pain
+    // elemental's soul-spitting are special-cased in MobTick/MobAttack.
+    [MK_CHAINGUNNER]   = { "chaingunner",  65,  70, 20.0f, 1.2f, 170,
+                           0.0f, 0, 0,  false, 0.0f, 0,  1, false, PK_CHAINGUN, 55 },
+    [MK_HELLKNIGHT]    = { "hellknight",   69, 500, 24.0f, 1.4f, 50,
+                           80.0f, 10, 8,  true, 15.0f, 8,  0, false, -1, 105 },
+    [MK_MANCUBUS]      = { "mancubus",     67, 600, 48.0f, 1.0f, 80,
+                           0.0f, 0, 0,  true, 16.0f, 8,  0, false, -1, 130 },
+    [MK_PAINELEMENTAL] = { "painelemental", 71, 400, 31.0f, 1.6f, 128,
+                           0.0f, 0, 0,  false, 0.0f, 0,  0, true, -1, 80 },
 };
 
 #define SKULL_CHARGE_SPEED 16.0f
@@ -1056,6 +1083,41 @@ static bool BuildTriNav(Sim *sim)
             }
             g0 = g1;
         }
+        // Teleporters connect regions no walk can: an edge from the front
+        // side of the trigger line to the destination thing. The waypoint
+        // sits PAST the line so walking to it guarantees the crossing.
+        for (int i = 0; i < map->lineCount; i++) {
+            const Linedef *l = &map->lines[i];
+            if (ActionForSpecial(l->special).kind != ACT_TELEPORT || l->tag <= 0)
+                continue;
+            Vector2 dest = { 0 };
+            bool have = false;
+            for (int t = 0; t < map->thingCount && !have; t++) {
+                if (map->things[t].type != 14) continue;
+                int ds = SimSectorAtPoint(sim, map->things[t].x, map->things[t].y);
+                if (ds >= 0 && map->sectors[ds].tag == l->tag) {
+                    dest = (Vector2){ map->things[t].x, map->things[t].y };
+                    have = true;
+                }
+            }
+            if (!have) continue;
+            int destTri = TriAtPoint(sim, dest.x, dest.y);
+            Vector2 a = map->verts[l->v1], b = map->verts[l->v2];
+            float dx = b.x - a.x, dy = b.y - a.y;
+            float len = sqrtf(dx*dx + dy*dy);
+            if (len < 1.0f || destTri < 0) continue;
+            Vector2 nrm = { dy/len, -dx/len };   // front side of v1->v2
+            Vector2 mid = { (a.x + b.x)*0.5f, (a.y + b.y)*0.5f };
+            int srcTri = TriAtPoint(sim, mid.x + nrm.x*12.0f, mid.y + nrm.y*12.0f);
+            if (srcTri < 0) continue;
+            if (pass == 0) {
+                sim->tEdgeStart[srcTri + 1]++;
+            } else {
+                sim->tEdges[fill[srcTri]++] = (NavEdge){
+                    .to = destTri, .line = i, .door = -1, .lift = -1,
+                    .wp = { mid.x - nrm.x*28.0f, mid.y - nrm.y*28.0f } };
+            }
+        }
         if (pass == 1) free(fill);
     }
     free(ek);
@@ -1316,6 +1378,11 @@ static void PruneRoute(Sim *sim)
         for (int j = i; j < dg->wpCount && j <= limit; j++) {
             if (SegClear(sim, cur, dg->wp[j])) far = j;
             if (dg->wpDoor[j] >= 0 || dg->wpLift[j] >= 0) break;
+            // Never shortcut past a teleport waypoint: he must cross it.
+            int e = dg->wpEdge[j];
+            if (e >= 0 && sim->tEdges[e].line >= 0 &&
+                ActionForSpecial(sim->map->lines[sim->tEdges[e].line].special).kind
+                    == ACT_TELEPORT) break;
         }
         dg->wp[out] = dg->wp[far];
         dg->wpFloor[out] = dg->wpFloor[far];
@@ -1510,9 +1577,14 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
     if (m->state == MOB_IDLE) m->state = MOB_CHASE;
 
     // Doom's infighting rule: hurt by another monster, turn on it.
-    // Same-species hits stay loyal (the projectile exemption, simplified).
+    // Same-species hits stay loyal (the projectile exemption, simplified),
+    // and hell's nobility (barons/knights) never turn on each other.
     // attackerMob: >=0 a monster, -1 Doom Guy, -2 the environment/player.
-    if (attackerMob >= 0 && attackerMob != idx &&
+    bool nobles = (m->kind == MK_BARON || m->kind == MK_HELLKNIGHT) &&
+                  attackerMob >= 0 &&
+                  (sim->mobs[attackerMob].kind == MK_BARON ||
+                   sim->mobs[attackerMob].kind == MK_HELLKNIGHT);
+    if (attackerMob >= 0 && attackerMob != idx && !nobles &&
         sim->mobs[attackerMob].kind != m->kind &&
         sim->mobs[attackerMob].state != MOB_DEAD) {
         if (m->targetMob != attackerMob) {
@@ -1542,6 +1614,15 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
         DecayCorpses(sim);
         int drop = MOB_INFO[m->kind].drop;
         if (drop >= 0) SpawnPickup(sim, (PickupType)drop, m->pos, m->z, true);
+        if (m->kind == MK_PAINELEMENTAL) {
+            // The death rattle: three last souls burst out (cap respected).
+            for (int k = 0; k < 3 && CountLiveSouls(sim) < MAXSKULLS; k++) {
+                float a = (float)k*2.094f;   // thirds of a circle
+                SpawnMob(sim, MK_LOSTSOUL, m->pos.x + cosf(a)*40.0f,
+                         m->pos.y + sinf(a)*40.0f, a*RAD2DEG, true,
+                         m->playerDropped);
+            }
+        }
         return;
     }
     if (SimRandom(sim) < MOB_INFO[m->kind].painChance) {
@@ -1807,7 +1888,10 @@ static void ProjTick(Sim *sim, Proj *p)
     } else {
         BoomKind bk = (p->ownerKind == MK_CACO) ? BOOM_CACOBALL
                     : (p->ownerKind == MK_REVENANT) ? BOOM_TRACER
-                    : (p->ownerKind == MK_BARON) ? BOOM_BARONBALL : BOOM_IMPBALL;
+                    : (p->ownerKind == MK_BARON ||
+                       p->ownerKind == MK_HELLKNIGHT) ? BOOM_BARONBALL
+                    : (p->ownerKind == MK_MANCUBUS) ? BOOM_ROCKET   // MISL B-D
+                                                    : BOOM_IMPBALL;
         PushBoom(sim, bk, hitPos, p->z);
         Snd(sim, SND_FIRXPL, hitPos);
     }
@@ -1995,6 +2079,21 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
         }
         return;
     }
+    if (m->kind == MK_PAINELEMENTAL) {
+        // The Soul Foundry: spit a charging lost soul at the target.
+        if (CountLiveSouls(sim) >= MAXSKULLS) return;   // vanilla self-cap
+        float len = fmaxf(dist, 1.0f);
+        float sx = m->pos.x + (tpos.x - m->pos.x)/len*(inf->radius + 24.0f);
+        float sy = m->pos.y + (tpos.y - m->pos.y)/len*(inf->radius + 24.0f);
+        int soul = SpawnMob(sim, MK_LOSTSOUL, sx, sy,
+                            atan2f(tpos.y - m->pos.y, tpos.x - m->pos.x)*RAD2DEG,
+                            true, m->playerDropped);
+        if (soul >= 0) {
+            sim->mobs[soul].targetMob = m->targetMob;
+            Snd(sim, SND_SKLATK, m->pos);
+        }
+        return;
+    }
     if (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius) {
         Snd(sim, (m->kind == MK_PINKY || m->kind == MK_SPECTRE)
                      ? SND_SGTATK : SND_CLAW, m->pos);
@@ -2094,7 +2193,35 @@ static void MobTick(Sim *sim, int idx)
         }
         MobFace(m, tpos, 45.0f);
         m->stateTics--;
-        if (m->stateTics == 4) MobAttack(sim, idx, tpos, tz, targetIsDG, m->targetMob);
+        if (m->kind == MK_CHAINGUNNER) {
+            // Sustained burst: three shots across the attack state.
+            if (m->stateTics == 12 || m->stateTics == 8 || m->stateTics == 4) {
+                MobAttack(sim, idx, tpos, tz, targetIsDG, m->targetMob);
+            }
+        } else if (m->kind == MK_MANCUBUS) {
+            // Three volleys of paired fireballs at offset angles: the
+            // flame lattice. Vanilla's dodge-between-the-pairs dance.
+            int volley = (m->stateTics == 22) ? 0
+                       : (m->stateTics == 14) ? 1
+                       : (m->stateTics == 6) ? 2 : -1;
+            if (volley >= 0) {
+                static const float OFF[3][2] = {
+                    { -6.0f, 6.0f }, { -20.0f, 4.0f }, { -4.0f, 20.0f },
+                };
+                float base = atan2f(tpos.y - m->pos.y, tpos.x - m->pos.x);
+                float fdist = fmaxf(Dist2D(m->pos, tpos), 64.0f);
+                Snd(sim, SND_FIRSHT, m->pos);
+                for (int s = 0; s < 2; s++) {
+                    float a = base + OFF[volley][s]*DEG2RAD;
+                    Vector2 at = { m->pos.x + cosf(a)*fdist,
+                                   m->pos.y + sinf(a)*fdist };
+                    SpawnProjectile(sim, idx, m->pos, m->z + 32.0f, at,
+                                    tz + 24.0f, 16.0f, 8, false, false);
+                }
+            }
+        } else if (m->stateTics == 4) {
+            MobAttack(sim, idx, tpos, tz, targetIsDG, m->targetMob);
+        }
         if (m->stateTics <= 0) {
             m->state = MOB_CHASE;
             m->attackCooldown = (m->kind == MK_ARCHVILE ? 60 : 30) + SimRandom(sim)%50;
@@ -2116,9 +2243,11 @@ static void MobTick(Sim *sim, int idx)
         float dist = Dist2D(m->pos, tpos);
         bool melee = (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius);
         bool ranged = (inf->pellets > 0 || inf->hasMissile ||
-                       m->kind == MK_ARCHVILE || m->kind == MK_LOSTSOUL);
+                       m->kind == MK_ARCHVILE || m->kind == MK_LOSTSOUL ||
+                       m->kind == MK_PAINELEMENTAL);
         float reach = (m->kind == MK_ARCHVILE) ? VILE_FLAME_RANGE
-                    : (m->kind == MK_LOSTSOUL) ? 600.0f : 1100.0f;
+                    : (m->kind == MK_LOSTSOUL) ? 600.0f
+                    : (m->kind == MK_PAINELEMENTAL) ? 800.0f : 1100.0f;
         if (m->attackCooldown <= 0 && (melee ||
             (ranged && dist < reach &&
              SightClearZ(sim, m->pos, m->z + 32.0f, tpos, tz + 24.0f)))) {
@@ -2127,7 +2256,9 @@ static void MobTick(Sim *sim, int idx)
             if (SimRandom(sim) < gate) {
                 m->state = MOB_ATTACK;
                 m->stateTics = (m->kind == MK_ARCHVILE) ? VILE_FLAME_TICS
-                             : (m->kind == MK_LOSTSOUL) ? SKULL_CHARGE_TICS : 10;
+                             : (m->kind == MK_LOSTSOUL) ? SKULL_CHARGE_TICS
+                             : (m->kind == MK_CHAINGUNNER) ? 16
+                             : (m->kind == MK_MANCUBUS) ? 30 : 10;
                 if (m->kind == MK_ARCHVILE) Snd(sim, SND_VILATK, m->pos);
                 if (m->kind == MK_LOSTSOUL) {
                     m->dodgeDir = atan2f(tpos.y - m->pos.y, tpos.x - m->pos.x);
@@ -2481,7 +2612,8 @@ static float DgThreatScore(const Sim *sim, int i, float dist, const bool *hasPro
         [MK_ZOMBIE] = 0.8f, [MK_SHOTGUNGUY] = 1.5f, [MK_IMP] = 1.0f,
         [MK_PINKY] = 1.0f, [MK_SPECTRE] = 1.0f, [MK_CACO] = 0.8f,
         [MK_LOSTSOUL] = 1.1f, [MK_REVENANT] = 1.7f, [MK_BARON] = 0.9f,
-        [MK_ARCHVILE] = 4.0f,
+        [MK_ARCHVILE] = 4.0f, [MK_CHAINGUNNER] = 1.8f, [MK_HELLKNIGHT] = 0.9f,
+        [MK_MANCUBUS] = 1.2f, [MK_PAINELEMENTAL] = 3.0f,
     };
     const Mob *m = &sim->mobs[i];
     const MobInfo *inf = &MOB_INFO[m->kind];

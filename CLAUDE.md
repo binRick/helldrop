@@ -34,7 +34,11 @@ Full design rationale and roadmap: `DESIGN.md`.
   revenant, baron, arch-vile, spectre), LMB drops it at the cursor.
   Darkness is ambush terrain: monsters in sectors under light 120 are
   spotted at half range and score lower on his threat ledger; spectres
-  carry their own darkness (treated as light 80 anywhere). TAB toggles
+  carry their own darkness (treated as light 80 anywhere). Doom 2 heavies
+  (shift+1..4: chaingunner, hell knight, mancubus, pain elemental) need
+  `make assets/freedoom2.wad` for sprites/sounds; they are excluded from
+  the E1 campaign unlocks. Known limit: some Doom 2 maps' progression
+  (e.g. MAP01) still dead-ends at NO_GOAL — more floor specials needed. TAB toggles
   the Know-Your-Enemy codex (his published tells — every line must stay
   true to the implementation); a floating intent label over his head
   telegraphs his current drive and flashes on change. C toggles the

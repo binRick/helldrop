@@ -31,7 +31,8 @@ typedef struct GameSprites {
     SpriteSet mobs[MK_COUNT];
     SpriteSet player;
     SpriteSet ball[2];          // BAL1 (imp), BAL2 (caco)
-    SpriteSet baronBall;        // BAL7
+    SpriteSet baronBall;        // BAL7 (barons and hell knights)
+    SpriteSet fatShot;          // MANF: mancubus fireballs
     SpriteSet tracer;           // FATB: revenant homing missile (FBXP boom)
     SpriteSet tracerBoom;
     SpriteSet missile;          // MISL: his rocket + its explosion frames

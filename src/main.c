@@ -304,6 +304,10 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_REVENANT]   = { 205, 195, 175, 255 },
     [MK_BARON]      = { 200, 140, 190, 255 },
     [MK_ARCHVILE]   = { 250, 225, 110, 255 },
+    [MK_CHAINGUNNER]   = { 180, 160,  80, 255 },
+    [MK_HELLKNIGHT]    = { 170, 190, 130, 255 },
+    [MK_MANCUBUS]      = { 165, 120,  90, 255 },
+    [MK_PAINELEMENTAL] = { 160,  90, 110, 255 },
 };
 
 static Vector3 MobRenderPos(const Mob *m, float alpha)
@@ -891,6 +895,9 @@ static const char *UnlockMapFor(MobKind k)
     case MK_REVENANT:                  return "E1M5";
     case MK_BARON:                     return "E1M6";
     case MK_ARCHVILE:                  return "E1M7";
+    case MK_CHAINGUNNER: case MK_HELLKNIGHT:
+    case MK_MANCUBUS: case MK_PAINELEMENTAL:
+        return "DOOM2";   // outside the E1 campaign; --wad freedoom2.wad
     default:                           return "E1M1";
     }
 }
@@ -1245,20 +1252,22 @@ static void DrawSoulsPanel(const Sim *sim, MobKind selected, unsigned unlocked)
     w = MeasureText(rate, 16);
     DrawTextShadowed(rate, sw - w - 16, y, 16, (Color){ 200, 140, 70, 255 });
     y += 28;
-    // Display numbers must match the actual key bindings, not enum order.
-    static const int KEY_LABELS[MK_COUNT] = {
-        [MK_ZOMBIE] = 1, [MK_SHOTGUNGUY] = 2, [MK_IMP] = 3, [MK_PINKY] = 4,
-        [MK_SPECTRE] = 0, [MK_CACO] = 5, [MK_LOSTSOUL] = 6,
-        [MK_REVENANT] = 7, [MK_BARON] = 8, [MK_ARCHVILE] = 9,
+    // Display keys must match the actual bindings, not enum order.
+    static const char *KEY_LABELS[MK_COUNT] = {
+        [MK_ZOMBIE] = "1", [MK_SHOTGUNGUY] = "2", [MK_IMP] = "3",
+        [MK_PINKY] = "4", [MK_SPECTRE] = "0", [MK_CACO] = "5",
+        [MK_LOSTSOUL] = "6", [MK_REVENANT] = "7", [MK_BARON] = "8",
+        [MK_ARCHVILE] = "9", [MK_CHAINGUNNER] = "s1", [MK_HELLKNIGHT] = "s2",
+        [MK_MANCUBUS] = "s3", [MK_PAINELEMENTAL] = "s4",
     };
     for (int k = 0; k < MK_COUNT; k++) {
         int cost = SimDropBaseCost((MobKind)k);
-        int keyLabel = KEY_LABELS[k];
         bool isUnlocked = (unlocked & (1u << k)) != 0;
         const char *label = isUnlocked
-            ? TextFormat("[%d] %-11s %3d", keyLabel, MobKindName((MobKind)k), cost)
-            : TextFormat("[%d] %-11s %s", keyLabel, MobKindName((MobKind)k),
-                         UnlockMapFor((MobKind)k));
+            ? TextFormat("[%s] %-13s %3d", KEY_LABELS[k],
+                         MobKindName((MobKind)k), cost)
+            : TextFormat("[%s] %-13s %s", KEY_LABELS[k],
+                         MobKindName((MobKind)k), UnlockMapFor((MobKind)k));
         Color c = MOB_COLORS[k];
         bool affordable = sim->souls >= (float)cost;
         if (!isUnlocked) c = (Color){ 95, 85, 85, 255 };
@@ -1515,10 +1524,11 @@ int main(int argc, char **argv)
             simAcc = 0.0;
         }
         int wantKind = -1;
-        if (IsKeyPressed(KEY_ONE))   wantKind = MK_ZOMBIE;
-        if (IsKeyPressed(KEY_TWO))   wantKind = MK_SHOTGUNGUY;
-        if (IsKeyPressed(KEY_THREE)) wantKind = MK_IMP;
-        if (IsKeyPressed(KEY_FOUR))  wantKind = MK_PINKY;
+        bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        if (IsKeyPressed(KEY_ONE))   wantKind = shift ? MK_CHAINGUNNER : MK_ZOMBIE;
+        if (IsKeyPressed(KEY_TWO))   wantKind = shift ? MK_HELLKNIGHT : MK_SHOTGUNGUY;
+        if (IsKeyPressed(KEY_THREE)) wantKind = shift ? MK_MANCUBUS : MK_IMP;
+        if (IsKeyPressed(KEY_FOUR))  wantKind = shift ? MK_PAINELEMENTAL : MK_PINKY;
         if (IsKeyPressed(KEY_FIVE))  wantKind = MK_CACO;
         if (IsKeyPressed(KEY_SIX))   wantKind = MK_LOSTSOUL;
         if (IsKeyPressed(KEY_SEVEN)) wantKind = MK_REVENANT;
@@ -1664,8 +1674,8 @@ int main(int argc, char **argv)
             if (opt.autodrop && sim.tic >= 250 && sim.tic % 250 == 0) {
                 // Odd waves bring an arch-vile to bank the previous wave's
                 // corpses — the smoke test for resurrection.
-                static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_CACO, MK_LOSTSOUL };
-                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_BARON, MK_IMP, MK_PINKY };
+                static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_HELLKNIGHT, MK_CHAINGUNNER };
+                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_MANCUBUS, MK_PAINELEMENTAL, MK_PINKY };
                 const MobKind *wave = ((sim.tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
                 float a = sim.dg.angleDeg*DEG2RAD;
                 for (int w = 0; w < 4; w++) {

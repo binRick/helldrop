@@ -101,6 +101,14 @@ $(WAD):
 	unzip -p /tmp/freedoom-dl.zip freedoom-$(FREEDOOM_VERSION)/freedoom1.wad > $(WAD)
 	@rm -f /tmp/freedoom-dl.zip
 
+# Optional: Doom 2 assets for the heavy bestiary's sprites/sounds.
+# Usage: make assets/freedoom2.wad, then --wad assets/freedoom2.wad --map MAP01
+assets/freedoom2.wad:
+	@mkdir -p assets
+	curl -sSL https://github.com/freedoom/freedoom/releases/download/v$(FREEDOOM_VERSION)/freedoom-$(FREEDOOM_VERSION).zip -o /tmp/freedoom-dl.zip
+	unzip -p /tmp/freedoom-dl.zip freedoom-$(FREEDOOM_VERSION)/freedoom2.wad > assets/freedoom2.wad
+	@rm -f /tmp/freedoom-dl.zip
+
 clean:
 	rm -rf $(APP) selftest.png logs
 

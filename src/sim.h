@@ -115,8 +115,15 @@ typedef enum MobKind {
     MK_REVENANT,    // 66:   homing tracers — cover denial
     MK_BARON,       // 3003: the Baron Tax — 1000hp ammo sponge
     MK_ARCHVILE,    // 64:   flame channel + raises corpses (the Corpse Bank)
+    // Doom 2 heavies (sprites/sounds need freedoom2.wad / DOOM2.WAD):
+    MK_CHAINGUNNER, // 65: sustained hitscan bursts, drops his chaingun
+    MK_HELLKNIGHT,  // 69: half a baron; nobles never infight each other
+    MK_MANCUBUS,    // 67: three paired-fireball volleys — the flame lattice
+    MK_PAINELEMENTAL, // 71: the Soul Foundry — spits lost souls, capped 21
     MK_COUNT
 } MobKind;
+
+#define MAXSKULLS 21    // vanilla live lost-soul cap (Soul Foundry governor)
 
 typedef enum MobState {
     MOB_IDLE, MOB_CHASE, MOB_ATTACK, MOB_PAIN, MOB_RAISE, MOB_DEAD
@@ -154,6 +161,8 @@ typedef enum SimSnd {
     SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
     SND_SKLATK, SND_SKESIT, SND_SKEATK, SND_SKEDTH,
     SND_BRSSIT, SND_BRSDTH,
+    SND_MANSIT, SND_MNPAIN, SND_MANDTH,
+    SND_PESIT, SND_PEPAIN, SND_PEDTH, SND_KNTSIT, SND_KNTDTH,
     SND_POPAIN, SND_DMPAIN, SND_PLPAIN, SND_VIPAIN,
     SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH, SND_PLDETH,
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
