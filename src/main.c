@@ -32,6 +32,7 @@
 typedef struct Options {
     const char *wadPath;
     const char *mapName;
+    bool mapExplicit;      // --map given: single-level mode, all unlocked
     bool noLog;
     bool selftest;
     bool autodrop;         // dev tool: scripted drops onto his route
@@ -63,6 +64,7 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
 {
     opt->wadPath = "assets/freedoom1.wad";
     opt->mapName = "E1M1";
+    opt->mapExplicit = false;
     opt->noLog = false;
     opt->selftest = false;
     opt->autodrop = false;
@@ -74,6 +76,7 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
             opt->wadPath = argv[++i];
         } else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
             opt->mapName = argv[++i];
+            opt->mapExplicit = true;
         } else if (strcmp(argv[i], "--no-log") == 0) {
             opt->noLog = true;
         } else if (strcmp(argv[i], "--selftest") == 0) {
@@ -777,6 +780,128 @@ static void DrawTextShadowed(const char *text, int x, int y, int size, Color col
     DrawText(text, x, y, size, color);
 }
 
+static void ViewReset(ViewState *vs);
+
+// Frame the whole level and widen the clip range to cover it: raylib's
+// default far cull distance (4000) equals CAM_DIST, so the far plane would
+// otherwise slice through the target plane and clip half the map.
+static void SetupView(ViewState *vs, const DoomMap *map)
+{
+    float extentX = map->maxX - map->minX;
+    float extentY = map->maxY - map->minY;
+    float extent = (extentX > extentY) ? extentX : extentY;
+    memset(vs, 0, sizeof(*vs));
+    vs->homeTarget = (Vector3){ (map->minX + map->maxX)*0.5f, 0.0f,
+                                -(map->minY + map->maxY)*0.5f };
+    vs->homeFovy = Clamp(fmaxf(extent*0.6f, 500.0f), FOVY_MIN, FOVY_MAX);
+    ViewReset(vs);
+    float diag = sqrtf(extentX*extentX + extentY*extentY);
+    rlSetClipPlanes(1.0, CAM_DIST + 2.0*diag);
+}
+
+// ------------------------------------------------------------- campaign
+
+// "Knee-Deep in His Blood": E1M1..E1M8 from Hell's side, the bestiary
+// unlocking in roughly Doom's own monster-introduction order. Killing him
+// inside a secret sector on E1M3 routes through the hidden E1M9.
+#define CAMPAIGN_SAVE "helldrop.sav"
+
+static unsigned UnlockMaskFor(const char *mapName)
+{
+    unsigned m = (1u << MK_ZOMBIE) | (1u << MK_IMP);
+    if (strcmp(mapName, "E1M1") == 0) return m;
+    m |= (1u << MK_SHOTGUNGUY) | (1u << MK_PINKY);
+    if (strcmp(mapName, "E1M2") == 0) return m;
+    m |= (1u << MK_LOSTSOUL);
+    if (strcmp(mapName, "E1M3") == 0 || strcmp(mapName, "E1M9") == 0) return m;
+    m |= (1u << MK_SPECTRE) | (1u << MK_CACO);
+    if (strcmp(mapName, "E1M4") == 0) return m;
+    m |= (1u << MK_REVENANT);
+    if (strcmp(mapName, "E1M5") == 0) return m;
+    m |= (1u << MK_BARON);
+    if (strcmp(mapName, "E1M6") == 0) return m;
+    m |= (1u << MK_ARCHVILE);
+    return m;   // E1M7, E1M8, unknown maps: everything
+}
+
+static const char *UnlockMapFor(MobKind k)
+{
+    switch (k) {
+    case MK_SHOTGUNGUY: case MK_PINKY: return "E1M2";
+    case MK_LOSTSOUL:                  return "E1M3";
+    case MK_SPECTRE: case MK_CACO:     return "E1M4";
+    case MK_REVENANT:                  return "E1M5";
+    case MK_BARON:                     return "E1M6";
+    case MK_ARCHVILE:                  return "E1M7";
+    default:                           return "E1M1";
+    }
+}
+
+static const char *NextCampaignMap(const char *cur, bool secretKill)
+{
+    if (strcmp(cur, "E1M1") == 0) return "E1M2";
+    if (strcmp(cur, "E1M2") == 0) return "E1M3";
+    if (strcmp(cur, "E1M3") == 0) return secretKill ? "E1M9" : "E1M4";
+    if (strcmp(cur, "E1M9") == 0) return "E1M4";
+    if (strcmp(cur, "E1M4") == 0) return "E1M5";
+    if (strcmp(cur, "E1M5") == 0) return "E1M6";
+    if (strcmp(cur, "E1M6") == 0) return "E1M7";
+    if (strcmp(cur, "E1M7") == 0) return "E1M8";
+    return NULL;   // E1M8 won: episode complete
+}
+
+static int CampaignNumber(const char *map)
+{
+    static const char *ORDER[] = { "E1M1", "E1M2", "E1M3", "E1M4",
+                                   "E1M5", "E1M6", "E1M7", "E1M8" };
+    for (int i = 0; i < 8; i++) {
+        if (strcmp(map, ORDER[i]) == 0) return i + 1;
+    }
+    return 0;   // E1M9 and friends sit outside the numbering
+}
+
+static void CampaignSave(const char *map)
+{
+    FILE *f = fopen(CAMPAIGN_SAVE, "w");
+    if (!f) return;
+    fprintf(f, "%s\n", map);
+    fclose(f);
+}
+
+static bool CampaignLoad(char *out, size_t cap)
+{
+    FILE *f = fopen(CAMPAIGN_SAVE, "r");
+    if (!f) return false;
+    char buf[16] = "";
+    bool ok = (fscanf(f, "%8s", buf) == 1);
+    fclose(f);
+    if (!ok || strlen(buf) != 4 || buf[0] != 'E') return false;
+    snprintf(out, cap, "%s", buf);
+    return true;
+}
+
+// Tear down and rebuild everything level-scoped; the WAD and its decoded
+// graphics/sounds persist across the whole episode.
+static bool ReloadLevel(const Wad *wad, const char *mapName, DoomMap *map,
+                        LevelMesh *lm, Sim *sim, float **thingHeights)
+{
+    SimFree(sim);
+    free(*thingHeights);
+    *thingHeights = NULL;
+    LevelMeshFree(lm);
+    MapFree(map);
+    if (!MapLoadFromWad(map, wad, mapName)) return false;
+    if (!LevelMeshBuild(lm, map)) return false;
+    *thingHeights = ComputeThingHeights(map, &lm->floors);
+    if (!SimInit(sim, map, lm)) return false;
+    if (StateLogEnabled()) {
+        StateLogBegin("campaign");
+        StateLogStr("map", mapName);
+        StateLogEnd();
+    }
+    return true;
+}
+
 // One full world pass, camera-agnostic: shared by the iso view and the
 // doomcam. Player-facing overlays (route, drop cursor, telegraphs) are
 // iso-only and drawn separately.
@@ -930,7 +1055,8 @@ static int ParSeconds(const char *mapName)
 }
 
 // The intermission screen, from the demons' side of the report card.
-static void DrawIntermission(const DoomMap *map, const Sim *sim)
+static void DrawIntermission(const DoomMap *map, const Sim *sim,
+                             const char *winHint)
 {
     bool won = (sim->dg.state == DG_DEAD);
     int cx = GetScreenWidth()/2, cy = GetScreenHeight()/2;
@@ -967,14 +1093,38 @@ static void DrawIntermission(const DoomMap *map, const Sim *sim)
         DrawTextShadowed(lines[i], cx - MeasureText(lines[i], 20)/2, y, 20, c);
         y += 28;
     }
-    const char *hint = "G restart   ESC quit";
-    DrawTextShadowed(hint, cx - MeasureText(hint, 16)/2, cy + 104, 16, GRAY);
+    const char *hint = (won && winHint) ? winHint : "G restart   ESC quit";
+    Color hc = (won && winHint) ? (Color){ 120, 255, 150, 255 } : GRAY;
+    DrawTextShadowed(hint, cx - MeasureText(hint, 16 + (winHint ? 6 : 0))/2,
+                     cy + 104, 16 + (winHint ? 6 : 0), hc);
 }
 
-static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, long turbo)
+static void DrawCampaignComplete(void)
+{
+    int cx = GetScreenWidth()/2, cy = GetScreenHeight()/2;
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(),
+                  (Color){ 5, 0, 0, 215 });
+    const char *l1 = "KNEE-DEEP IN HIS BLOOD";
+    const char *l2 = "EPISODE COMPLETE - THE INVASION HOLDS";
+    const char *l3 = "he never made it past the hangar district";
+    const char *l4 = "SPACE to invade again";
+    DrawTextShadowed(l1, cx - MeasureText(l1, 44)/2, cy - 80, 44,
+                     (Color){ 255, 70, 50, 255 });
+    DrawTextShadowed(l2, cx - MeasureText(l2, 24)/2, cy - 24, 24,
+                     (Color){ 90, 255, 110, 255 });
+    DrawTextShadowed(l3, cx - MeasureText(l3, 18)/2, cy + 14, 18, LIGHTGRAY);
+    DrawTextShadowed(l4, cx - MeasureText(l4, 20)/2, cy + 60, 20, RAYWHITE);
+}
+
+static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
+                    long turbo, const char *campLabel, const char *winHint)
 {
     int y = 12;
     DrawTextShadowed(map->name, 12, y, 24, RAYWHITE);
+    if (campLabel) {
+        DrawTextShadowed(campLabel, 12 + MeasureText(map->name, 24) + 16, y + 6,
+                         16, (Color){ 255, 120, 90, 255 });
+    }
     y += 30;
     DrawTextShadowed(wadBase, 12, y, 16, LIGHTGRAY);
     y += 20;
@@ -1013,7 +1163,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
                      12, y, 14, (Color){ 230, 140, 90, 255 });
 
     if (sim->dg.state == DG_EXITED || sim->dg.state == DG_DEAD) {
-        DrawIntermission(map, sim);
+        DrawIntermission(map, sim, winHint);
     } else if (sim->dg.state == DG_NO_GOAL) {
         const char *line1 = "NO ROUTE TO EXIT";
         int w1 = MeasureText(line1, 28);
@@ -1023,8 +1173,9 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
 }
 
 // Top-right: the soul economy at a glance — balance, drip rate, the priced
-// bestiary with the selected monster highlighted and unaffordables dimmed.
-static void DrawSoulsPanel(const Sim *sim, MobKind selected)
+// bestiary with the selected monster highlighted, unaffordables dimmed,
+// and campaign-locked entries showing their unlock level.
+static void DrawSoulsPanel(const Sim *sim, MobKind selected, unsigned unlocked)
 {
     int sw = GetScreenWidth();
     int y = 12;
@@ -1036,13 +1187,24 @@ static void DrawSoulsPanel(const Sim *sim, MobKind selected)
     w = MeasureText(rate, 16);
     DrawTextShadowed(rate, sw - w - 16, y, 16, (Color){ 200, 140, 70, 255 });
     y += 28;
+    // Display numbers must match the actual key bindings, not enum order.
+    static const int KEY_LABELS[MK_COUNT] = {
+        [MK_ZOMBIE] = 1, [MK_SHOTGUNGUY] = 2, [MK_IMP] = 3, [MK_PINKY] = 4,
+        [MK_SPECTRE] = 0, [MK_CACO] = 5, [MK_LOSTSOUL] = 6,
+        [MK_REVENANT] = 7, [MK_BARON] = 8, [MK_ARCHVILE] = 9,
+    };
     for (int k = 0; k < MK_COUNT; k++) {
         int cost = SimDropBaseCost((MobKind)k);
-        const char *label = TextFormat("[%d] %-11s %3d", k + 1,
-                                       MobKindName((MobKind)k), cost);
+        int keyLabel = KEY_LABELS[k];
+        bool isUnlocked = (unlocked & (1u << k)) != 0;
+        const char *label = isUnlocked
+            ? TextFormat("[%d] %-11s %3d", keyLabel, MobKindName((MobKind)k), cost)
+            : TextFormat("[%d] %-11s %s", keyLabel, MobKindName((MobKind)k),
+                         UnlockMapFor((MobKind)k));
         Color c = MOB_COLORS[k];
         bool affordable = sim->souls >= (float)cost;
-        if (!affordable) c = (Color){ 120, 70, 70, 255 };
+        if (!isUnlocked) c = (Color){ 95, 85, 85, 255 };
+        else if (!affordable) c = (Color){ 120, 70, 70, 255 };
         else if ((MobKind)k != selected) {
             c.r = (unsigned char)(c.r/2 + 50);
             c.g = (unsigned char)(c.g/2 + 50);
@@ -1050,7 +1212,7 @@ static void DrawSoulsPanel(const Sim *sim, MobKind selected)
         }
         w = MeasureText(label, 18);
         DrawTextShadowed(label, sw - w - 16, y, 18, c);
-        if ((MobKind)k == selected) {
+        if ((MobKind)k == selected && isUnlocked) {
             DrawRectangle(sw - w - 16, y + 20, w, 2, MOB_COLORS[k]);
         }
         y += 24;
@@ -1203,22 +1365,29 @@ int main(int argc, char **argv)
     DoomMap map = { 0 };
     LevelMesh lm = { 0 };
 
+    // Campaign mode unless --map pins a single level; progress persists in
+    // a one-line save file beside the binary.
+    bool campaign = !opt.mapExplicit;
+    char curMap[9];
+    snprintf(curMap, sizeof(curMap), "%s", opt.mapName);
+    if (campaign) CampaignLoad(curMap, sizeof(curMap));
+
     if (!WadLoad(&wad, opt.wadPath)) {
         TraceLog(LOG_ERROR, "MAIN: failed to load WAD '%s'", opt.wadPath);
         CloseWindow();
         StateLogClose();
         return 1;
     }
-    if (!MapLoadFromWad(&map, &wad, opt.mapName)) {
+    if (!MapLoadFromWad(&map, &wad, curMap)) {
         TraceLog(LOG_ERROR, "MAIN: failed to load map '%s' from '%s'",
-                 opt.mapName, opt.wadPath);
+                 curMap, opt.wadPath);
         WadFree(&wad);
         CloseWindow();
         StateLogClose();
         return 1;
     }
     if (!LevelMeshBuild(&lm, &map)) {
-        TraceLog(LOG_ERROR, "MAIN: failed to build level mesh for '%s'", opt.mapName);
+        TraceLog(LOG_ERROR, "MAIN: failed to build level mesh for '%s'", curMap);
         MapFree(&map);
         WadFree(&wad);
         CloseWindow();
@@ -1242,19 +1411,7 @@ int main(int argc, char **argv)
     }
 
     ViewState vs = { 0 };
-    float extentX = map.maxX - map.minX;
-    float extentY = map.maxY - map.minY;
-    float extent = (extentX > extentY) ? extentX : extentY;
-    vs.homeTarget = (Vector3){ (map.minX + map.maxX)*0.5f, 0.0f,
-                               -(map.minY + map.maxY)*0.5f };
-    vs.homeFovy = Clamp(fmaxf(extent*0.6f, 500.0f), FOVY_MIN, FOVY_MAX);
-    ViewReset(&vs);
-
-    // raylib's default far cull distance (4000) equals CAM_DIST, so the far
-    // plane would slice through the target plane and clip half the map.
-    // Widen the clip range to cover the whole level from any orbit angle.
-    float diag = sqrtf(extentX*extentX + extentY*extentY);
-    rlSetClipPlanes(1.0, CAM_DIST + 2.0*diag);
+    SetupView(&vs, &map);
 
     DoomHud hud = { 0 };
     if (!DoomHudLoad(&hud, &wad)) {
@@ -1281,6 +1438,9 @@ int main(int argc, char **argv)
     bool doomcamOn = true;
     RenderTexture2D doomcamRT = LoadRenderTexture(320, 200);
     SetTextureFilter(doomcamRT.texture, TEXTURE_FILTER_POINT);
+    bool campaignComplete = false;
+    unsigned unlocked = campaign ? UnlockMaskFor(curMap) : 0xFFFFFFFFu;
+    if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
     while (!WindowShouldClose()) {
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
@@ -1293,16 +1453,59 @@ int main(int argc, char **argv)
             SimInit(&sim, &map, &lm);
             simAcc = 0.0;
         }
-        if (IsKeyPressed(KEY_ONE))   selectedKind = MK_ZOMBIE;
-        if (IsKeyPressed(KEY_TWO))   selectedKind = MK_SHOTGUNGUY;
-        if (IsKeyPressed(KEY_THREE)) selectedKind = MK_IMP;
-        if (IsKeyPressed(KEY_FOUR))  selectedKind = MK_PINKY;
-        if (IsKeyPressed(KEY_FIVE))  selectedKind = MK_CACO;
-        if (IsKeyPressed(KEY_SIX))   selectedKind = MK_LOSTSOUL;
-        if (IsKeyPressed(KEY_SEVEN)) selectedKind = MK_REVENANT;
-        if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_BARON;
-        if (IsKeyPressed(KEY_NINE))  selectedKind = MK_ARCHVILE;
-        if (IsKeyPressed(KEY_ZERO))  selectedKind = MK_SPECTRE;
+        int wantKind = -1;
+        if (IsKeyPressed(KEY_ONE))   wantKind = MK_ZOMBIE;
+        if (IsKeyPressed(KEY_TWO))   wantKind = MK_SHOTGUNGUY;
+        if (IsKeyPressed(KEY_THREE)) wantKind = MK_IMP;
+        if (IsKeyPressed(KEY_FOUR))  wantKind = MK_PINKY;
+        if (IsKeyPressed(KEY_FIVE))  wantKind = MK_CACO;
+        if (IsKeyPressed(KEY_SIX))   wantKind = MK_LOSTSOUL;
+        if (IsKeyPressed(KEY_SEVEN)) wantKind = MK_REVENANT;
+        if (IsKeyPressed(KEY_EIGHT)) wantKind = MK_BARON;
+        if (IsKeyPressed(KEY_NINE))  wantKind = MK_ARCHVILE;
+        if (IsKeyPressed(KEY_ZERO))  wantKind = MK_SPECTRE;
+        if (wantKind >= 0) {
+            if (unlocked & (1u << wantKind)) {
+                selectedKind = (MobKind)wantKind;
+            } else {
+                snprintf(dropMsg, sizeof(dropMsg), "%s ARRIVES ON %s",
+                         MobKindName((MobKind)wantKind),
+                         UnlockMapFor((MobKind)wantKind));
+                dropMsgFrames = 80;
+            }
+        }
+
+        // Campaign advance: a win and a SPACE move the invasion forward.
+        if (campaign && IsKeyPressed(KEY_SPACE)) {
+            const char *next = NULL;
+            bool advance = false;
+            if (campaignComplete) {
+                next = "E1M1";
+                campaignComplete = false;
+                advance = true;
+            } else if (sim.dg.state == DG_DEAD) {
+                bool secret = (strcmp(map.name, "E1M3") == 0 &&
+                               sim.dg.sector >= 0 &&
+                               map.sectors[sim.dg.sector].special == 9);
+                next = NextCampaignMap(curMap, secret);
+                if (!next) campaignComplete = true;
+                else advance = true;
+            }
+            if (advance) {
+                snprintf(curMap, sizeof(curMap), "%s", next);
+                CampaignSave(curMap);
+                if (!ReloadLevel(&wad, curMap, &map, &lm, &sim, &thingHeights)) {
+                    TraceLog(LOG_ERROR, "MAIN: failed to load '%s'", curMap);
+                    break;
+                }
+                SetupView(&vs, &map);
+                unlocked = UnlockMaskFor(curMap);
+                if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
+                simAcc = 0.0;
+                intentPrev[0] = '\0';
+                continue;
+            }
+        }
         if (IsKeyPressed(KEY_TAB)) {
             codexOpen = !codexOpen;
             LogInput(codexOpen ? "codex_open" : "codex_close");
@@ -1479,9 +1682,20 @@ int main(int argc, char **argv)
         }
         if (intentFlash > 0) intentFlash--;
         DrawIntent(&sim, cam, simAlpha, intent, intentFlash);
-        DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo);
-        DrawSoulsPanel(&sim, selectedKind);
+        const char *campLabel = NULL;
+        if (campaign) {
+            int num = CampaignNumber(curMap);
+            campLabel = (num > 0)
+                ? TextFormat("KNEE-DEEP IN HIS BLOOD - MAP %d/8", num)
+                : "KNEE-DEEP IN HIS BLOOD - SECRET LEVEL";
+        }
+        const char *winHint = (campaign && !campaignComplete)
+                                  ? "SPACE: the invasion advances" : NULL;
+        DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo,
+                campLabel, winHint);
+        DrawSoulsPanel(&sim, selectedKind, unlocked);
         if (codexOpen) DrawCodex();
+        if (campaignComplete) DrawCampaignComplete();
         FaceStateUpdate(&faceState, &sim);
         DrawStatusBar(&hud, &sim, &faceState, frame);
         if (groundOk && cursorCost > 0) {
