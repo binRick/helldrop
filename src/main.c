@@ -292,6 +292,7 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_SHOTGUNGUY] = { 150, 150,  95, 255 },
     [MK_IMP]        = { 185,  90,  55, 255 },
     [MK_PINKY]      = { 240, 135, 160, 255 },
+    [MK_SPECTRE]    = {  70,  70,  85, 255 },
     [MK_CACO]       = { 215,  70,  80, 255 },
     [MK_LOSTSOUL]   = { 235, 205, 130, 255 },
     [MK_REVENANT]   = { 205, 195, 175, 255 },
@@ -316,7 +317,10 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
         Vector3 p = MobRenderPos(m, alpha);
         const SpriteFrame *f = gs->valid ? MobSpriteFrame(gs, m, sim->tic) : NULL;
         if (f) {
-            DrawSpriteBillboard(cam, f, SpriteRotation(m->angleDeg, camYaw), p, WHITE);
+            // Spectres render as a dark ghost of the pinky sprite.
+            Color tint = (m->kind == MK_SPECTRE) ? (Color){ 38, 38, 50, 255 }
+                                                 : WHITE;
+            DrawSpriteBillboard(cam, f, SpriteRotation(m->angleDeg, camYaw), p, tint);
         } else if (m->state == MOB_DEAD) {
             DrawCylinder(p, r*0.9f, r*0.9f, 3.0f, 8, (Color){ 95, 42, 42, 255 });
         } else {
@@ -1148,6 +1152,7 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_SEVEN)) selectedKind = MK_REVENANT;
         if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_BARON;
         if (IsKeyPressed(KEY_NINE))  selectedKind = MK_ARCHVILE;
+        if (IsKeyPressed(KEY_ZERO))  selectedKind = MK_SPECTRE;
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);

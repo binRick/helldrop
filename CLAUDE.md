@@ -23,9 +23,12 @@ Full design rationale and roadmap: `DESIGN.md`.
 - `--selftest` — loads the map, renders 60 frames, writes `selftest.png`,
   exits 0. Combine with `--turbo 8` to screenshot mid-simulation. Use this
   (then Read the png) to verify changes without user interaction.
-- In-game: G restarts the sim (deterministic — same playout). 1–9 select a
-  monster (zombieman, shotgunguy, imp, pinky, caco, lost soul, revenant,
-  baron, arch-vile), LMB drops it at the cursor. Match end shows the
+- In-game: G restarts the sim (deterministic — same playout). 1–9 and 0
+  select a monster (zombieman, shotgunguy, imp, pinky, caco, lost soul,
+  revenant, baron, arch-vile, spectre), LMB drops it at the cursor.
+  Darkness is ambush terrain: monsters in sectors under light 120 are
+  spotted at half range and score lower on his threat ledger; spectres
+  carry their own darkness (treated as light 80 anywhere). Match end shows the
   intermission report card (vanilla E1 PAR times in `ParSeconds`).
   `--selftest` screenshots at frame 60, or at `--exit-after N` when given. **Hell's Hand** (each on a 12s
   cooldown): F slams/holds the door — or recalls the lift — nearest the

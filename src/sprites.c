@@ -21,6 +21,7 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
     [MK_SHOTGUNGUY] = { "SPOS", "ABCD",   "EF",  'G', "HIJKL", NULL },
     [MK_IMP]        = { "TROO", "ABCD",   "EFG", 'H', "IJKLM", NULL },
     [MK_PINKY]      = { "SARG", "ABCD",   "EFG", 'H', "IJKLMN", NULL },
+    [MK_SPECTRE]    = { "SARG", "ABCD",   "EFG", 'H', "IJKLMN", NULL },
     [MK_CACO]       = { "HEAD", "A",      "BCD", 'E', "FGHIJK", NULL },
     [MK_LOSTSOUL]   = { "SKUL", "AB",     "CD",  'E', "FGHIJK", NULL },
     [MK_REVENANT]   = { "SKEL", "ABCDEF", "JK",  'L', "LMNOPQ", NULL },

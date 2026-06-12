@@ -32,16 +32,22 @@ static void Snd(struct Sim *sim, int id, Vector2 pos)
 
 // Per-kind voice lines: sight, pain, death, melee.
 static const int MOB_SND_SIGHT[MK_COUNT] = {
-    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
-    SND_SKLATK, SND_SKESIT, SND_BRSSIT, SND_VILSIT,
+    [MK_ZOMBIE] = SND_POSIT, [MK_SHOTGUNGUY] = SND_POSIT, [MK_IMP] = SND_BGSIT,
+    [MK_PINKY] = SND_SGTSIT, [MK_SPECTRE] = SND_SGTSIT, [MK_CACO] = SND_CACSIT,
+    [MK_LOSTSOUL] = SND_SKLATK, [MK_REVENANT] = SND_SKESIT,
+    [MK_BARON] = SND_BRSSIT, [MK_ARCHVILE] = SND_VILSIT,
 };
 static const int MOB_SND_PAIN[MK_COUNT] = {
-    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN,
-    SND_DMPAIN, SND_POPAIN, SND_DMPAIN, SND_VIPAIN,
+    [MK_ZOMBIE] = SND_POPAIN, [MK_SHOTGUNGUY] = SND_POPAIN, [MK_IMP] = SND_POPAIN,
+    [MK_PINKY] = SND_DMPAIN, [MK_SPECTRE] = SND_DMPAIN, [MK_CACO] = SND_DMPAIN,
+    [MK_LOSTSOUL] = SND_DMPAIN, [MK_REVENANT] = SND_POPAIN,
+    [MK_BARON] = SND_DMPAIN, [MK_ARCHVILE] = SND_VIPAIN,
 };
 static const int MOB_SND_DEATH[MK_COUNT] = {
-    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH,
-    SND_FIRXPL, SND_SKEDTH, SND_BRSDTH, SND_VILDTH,
+    [MK_ZOMBIE] = SND_PODTH, [MK_SHOTGUNGUY] = SND_PODTH, [MK_IMP] = SND_BGDTH,
+    [MK_PINKY] = SND_SGTDTH, [MK_SPECTRE] = SND_SGTDTH, [MK_CACO] = SND_CACDTH,
+    [MK_LOSTSOUL] = SND_FIRXPL, [MK_REVENANT] = SND_SKEDTH,
+    [MK_BARON] = SND_BRSDTH, [MK_ARCHVILE] = SND_VILDTH,
 };
 
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
@@ -73,6 +79,8 @@ static const MobInfo MOB_INFO[MK_COUNT] = {
                         70.0f, 3, 8,  true, 10.0f, 3,  0, false, -1, 22 },
     [MK_PINKY]      = { "pinky",      3002, 150, 30.0f, 2.4f, 180,
                         80.0f, 4, 10, false, 0.0f, 0,  0, false, -1, 38 },
+    [MK_SPECTRE]    = { "spectre",      58, 150, 30.0f, 2.4f, 180,
+                        80.0f, 4, 10, false, 0.0f, 0,  0, false, -1, 50 },
     [MK_CACO]       = { "cacodemon",  3005, 400, 31.0f, 1.6f, 128,
                         90.0f, 10, 6,  true, 10.0f, 5,  0, true, -1, 65 },
     // The lost soul's charge is special-cased in MobTick (no normal attack).
@@ -1988,7 +1996,8 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
         return;
     }
     if (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius) {
-        Snd(sim, (m->kind == MK_PINKY) ? SND_SGTATK : SND_CLAW, m->pos);
+        Snd(sim, (m->kind == MK_PINKY || m->kind == MK_SPECTRE)
+                     ? SND_SGTATK : SND_CLAW, m->pos);
         int dmg = (SimRandom(sim)%inf->meleeDie + 1) * inf->meleeMult;
         if (targetIsDG) DamageDG(sim, dmg, idx);
         else DamageMob(sim, targetMob, dmg, idx);
@@ -2152,8 +2161,10 @@ static void MobTick(Sim *sim, int idx)
     }
 
     // Ground entities snap to the floor; cacos float toward target height.
-    bool onMap = false;
-    float floorH = SimFloorAtPoint(sim, m->pos.x, m->pos.y, &onMap);
+    int msec = SimSectorAtPoint(sim, m->pos.x, m->pos.y);
+    bool onMap = (msec >= 0);
+    if (onMap) m->sector = msec;
+    float floorH = onMap ? SimSectorFloorNow(sim, msec) : 0.0f;
     if (inf->flyer) {
         float want = (m->state == MOB_CHASE || m->state == MOB_ATTACK)
                          ? tz + 24.0f : m->z;
@@ -2468,8 +2479,9 @@ static float DgThreatScore(const Sim *sim, int i, float dist, const bool *hasPro
 {
     static const float CLASS_W[MK_COUNT] = {
         [MK_ZOMBIE] = 0.8f, [MK_SHOTGUNGUY] = 1.5f, [MK_IMP] = 1.0f,
-        [MK_PINKY] = 1.0f, [MK_CACO] = 0.8f, [MK_LOSTSOUL] = 1.1f,
-        [MK_REVENANT] = 1.7f, [MK_BARON] = 0.9f, [MK_ARCHVILE] = 4.0f,
+        [MK_PINKY] = 1.0f, [MK_SPECTRE] = 1.0f, [MK_CACO] = 0.8f,
+        [MK_LOSTSOUL] = 1.1f, [MK_REVENANT] = 1.7f, [MK_BARON] = 0.9f,
+        [MK_ARCHVILE] = 4.0f,
     };
     const Mob *m = &sim->mobs[i];
     const MobInfo *inf = &MOB_INFO[m->kind];
@@ -2510,8 +2522,14 @@ static int DgPickTarget(Sim *sim)
         Mob *m = &sim->mobs[i];
         if (m->state == MOB_DEAD) continue;
         float dist = Dist2D(dg->pos, m->pos);
-        if (dist > SIGHT_RANGE) continue;
+        // Darkness is ambush terrain: monsters in dim sectors are spotted
+        // at half range, and the spectre brings its own darkness with it.
+        int light = (m->sector >= 0) ? sim->map->sectors[m->sector].light : 255;
+        if (m->kind == MK_SPECTRE && light > 80) light = 80;
+        float seeRange = (light < 120) ? SIGHT_RANGE*0.5f : SIGHT_RANGE;
+        if (dist > seeRange) continue;
         float score = DgThreatScore(sim, i, dist, hasProj);
+        if (light < 120) score *= 0.75f;
         if (score <= bestScore) continue;   // cheap reject before the raycast
         if (!SightClearZ(sim, dg->pos, dg->z + DG_EYE, m->pos, m->z + 24.0f)) continue;
         bestScore = score;
@@ -3014,6 +3032,7 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     m->health = MOB_INFO[kind].health;
     m->state = awake ? MOB_CHASE : MOB_IDLE;
     m->awake = awake;
+    m->sector = SimSectorAtPoint(sim, x, y);
     m->targetMob = -1;
     m->raiseTarget = -1;
     m->playerDropped = playerDropped;

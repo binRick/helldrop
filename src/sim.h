@@ -109,6 +109,7 @@ typedef enum MobKind {
     MK_SHOTGUNGUY,  // 9:    3-pellet hitscan, drops a shotgun
     MK_IMP,         // 3001: fireball + claw
     MK_PINKY,       // 3002: fast melee wall
+    MK_SPECTRE,     // 58:   pinky in the dark — he barely sees it
     MK_CACO,        // 3005: flyer, ball + bite
     MK_LOSTSOUL,    // 3006: flyer, dive-bomb charge
     MK_REVENANT,    // 66:   homing tracers — cover denial
@@ -134,6 +135,7 @@ typedef struct Mob {
     MobState state;
     int stateTics;          // countdown inside ATTACK/PAIN
     int attackCooldown;
+    int sector;             // cached containing sector, -1 unknown
     int targetMob;          // infight target, -1 = Doom Guy
     int dodgeTics;          // blocked-path wiggle, Doom A_Chase style
     float dodgeDir;
