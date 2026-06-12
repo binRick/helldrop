@@ -243,12 +243,15 @@ static Vector3 DgRenderPos(const Sim *sim, float alpha)
 }
 
 static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
-                        Camera3D cam, float camYaw)
+                        Camera3D cam)
 {
     Vector3 p = DgRenderPos(sim, alpha);
     const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, &sim->dg, sim->tic) : NULL;
     if (f) {
-        DrawSpriteBillboard(cam, f, SpriteRotation(sim->dg.angleDeg, camYaw), p, WHITE);
+        int rot = SpriteRotationFrom(sim->dg.angleDeg,
+                                     (Vector2){ cam.position.x, -cam.position.z },
+                                     (Vector2){ p.x, -p.z });
+        DrawSpriteBillboard(cam, f, rot, p, WHITE);
         return;
     }
     Vector3 feet = { p.x, p.y + DG_RADIUS, p.z };
@@ -309,8 +312,9 @@ static Vector3 MobRenderPos(const Mob *m, float alpha)
 }
 
 static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
-                     Camera3D cam, float camYaw)
+                     Camera3D cam)
 {
+    Vector2 viewer = { cam.position.x, -cam.position.z };
     for (int i = 0; i < sim->mobCount; i++) {
         const Mob *m = &sim->mobs[i];
         float r = MobRadius(m->kind);
@@ -320,7 +324,9 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
             // Spectres render as a dark ghost of the pinky sprite.
             Color tint = (m->kind == MK_SPECTRE) ? (Color){ 38, 38, 50, 255 }
                                                  : WHITE;
-            DrawSpriteBillboard(cam, f, SpriteRotation(m->angleDeg, camYaw), p, tint);
+            int rot = SpriteRotationFrom(m->angleDeg, viewer,
+                                         (Vector2){ p.x, -p.z });
+            DrawSpriteBillboard(cam, f, rot, p, tint);
         } else if (m->state == MOB_DEAD) {
             DrawCylinder(p, r*0.9f, r*0.9f, 3.0f, 8, (Color){ 95, 42, 42, 255 });
         } else {
@@ -771,6 +777,62 @@ static void DrawTextShadowed(const char *text, int x, int y, int size, Color col
     DrawText(text, x, y, size, color);
 }
 
+// One full world pass, camera-agnostic: shared by the iso view and the
+// doomcam. Player-facing overlays (route, drop cursor, telegraphs) are
+// iso-only and drawn separately.
+static void DrawWorld(const Sim *sim, const LevelMesh *lm, const DoomMap *map,
+                      const float *thingHeights, const GameSprites *gs,
+                      Camera3D cam, float alpha, bool includeDG)
+{
+    BeginMode3D(cam);
+    LevelMeshDraw(lm);
+    DrawLifts(sim, lm, alpha);
+    DrawDoors(sim, alpha);
+    DrawThings(map, thingHeights);
+    if (gs->valid) BeginShaderMode(gs->alphaTest);
+    DrawBarrels(sim, gs, cam);
+    DrawPickups(sim, gs, cam);
+    DrawMobs(sim, alpha, gs, cam);
+    DrawProjectiles(sim, alpha, gs, cam);
+    DrawBooms(sim, gs, cam);
+    if (includeDG) DrawDoomGuy(sim, alpha, gs, cam);
+    for (int i = 0; i < sim->mobCount; i++) {
+        const Mob *m = &sim->mobs[i];
+        if (m->kind != MK_ARCHVILE || m->state != MOB_ATTACK) continue;
+        const SpriteFrame *ff = FireSpriteFrame(gs, sim->tic);
+        if (!ff) break;
+        Vector3 at = (m->targetMob < 0)
+                         ? DgRenderPos(sim, alpha)
+                         : MobRenderPos(&sim->mobs[m->targetMob], alpha);
+        DrawSpriteBillboard(cam, ff, 0, at, WHITE);
+    }
+    if (gs->valid) EndShaderMode();
+    DrawTracers(sim);
+    EndMode3D();
+}
+
+// His eyes: perspective camera at eye height, dropping to the floor over
+// the first second of his death, vanilla-style.
+static Camera3D DoomcamFrom(const Sim *sim, float alpha)
+{
+    Vector3 eye = DgRenderPos(sim, alpha);
+    float a = sim->dg.angleDeg*DEG2RAD;
+    float eyeH = 41.0f;
+    if (sim->dg.state == DG_DEAD) {
+        long dt = sim->tic - sim->dg.deathTic;
+        float drop = (dt > 35) ? 1.0f : (float)dt/35.0f;
+        eyeH = 41.0f - 33.0f*drop;
+    }
+    Camera3D fp = { 0 };
+    fp.position = (Vector3){ eye.x, eye.y + eyeH, eye.z };
+    fp.target = (Vector3){ eye.x + cosf(a)*64.0f, eye.y + eyeH,
+                           eye.z - sinf(a)*64.0f };
+    fp.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    fp.fovy = 73.0f;
+    fp.projection = CAMERA_PERSPECTIVE;
+    return fp;
+}
+
 // ------------------------------------------------------- intent + codex
 
 // In-the-moment intent telegraphy: what is he doing RIGHT NOW. Loop Hero's
@@ -942,7 +1004,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
 
     y += 20;
     DrawTextShadowed("WASD pan  RMB drag  wheel zoom  Q/E rotate  Z/X tilt  "
-                     "R view  TAB codex  G restart  ESC quit",
+                     "R view  TAB codex  C doomcam  G restart  ESC quit",
                      12, y, 14, GRAY);
     y += 18;
     DrawTextShadowed(TextFormat("HELL'S HAND:  F slam door %d / recall lift %d"
@@ -1216,6 +1278,9 @@ int main(int argc, char **argv)
     bool codexOpen = opt.selftest;   // selftest screenshots include it
     char intentPrev[64] = "";
     int intentFlash = 0;
+    bool doomcamOn = true;
+    RenderTexture2D doomcamRT = LoadRenderTexture(320, 200);
+    SetTextureFilter(doomcamRT.texture, TEXTURE_FILTER_POINT);
     while (!WindowShouldClose()) {
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
@@ -1241,6 +1306,10 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_TAB)) {
             codexOpen = !codexOpen;
             LogInput(codexOpen ? "codex_open" : "codex_close");
+        }
+        if (IsKeyPressed(KEY_C)) {
+            doomcamOn = !doomcamOn;
+            LogInput(doomcamOn ? "doomcam_on" : "doomcam_off");
         }
 
         Vector2 ground = { 0 };
@@ -1346,36 +1415,23 @@ int main(int argc, char **argv)
 
         GameAudioDrain(&gaudio, &sim, (Vector2){ vs.target.x, -vs.target.z });
 
+        // Doomcam pass: his view into a 320x200 target (drawn as PiP, or
+        // fullscreen for the death takeover).
+        long deathAge = (sim.dg.state == DG_DEAD) ? (sim.tic - sim.dg.deathTic) : -1;
+        bool takeover = (deathAge >= 0 && deathAge < 140);
+        if (doomcamOn || takeover) {
+            Camera3D fp = DoomcamFrom(&sim, simAlpha);
+            BeginTextureMode(doomcamRT);
+            ClearBackground((Color){ 10, 10, 12, 255 });
+            DrawWorld(&sim, &lm, &map, thingHeights, &gsprites, fp, simAlpha, false);
+            EndTextureMode();
+        }
+
         BeginDrawing();
         ClearBackground((Color){ 12, 12, 14, 255 });
+        DrawWorld(&sim, &lm, &map, thingHeights, &gsprites, cam, simAlpha, true);
         BeginMode3D(cam);
-        LevelMeshDraw(&lm);
-        DrawLifts(&sim, &lm, simAlpha);
-        DrawDoors(&sim, simAlpha);
-        DrawThings(&map, thingHeights);
         DrawRoute(&sim, simAlpha);
-        // Billboards go through the alpha-test shader so they write depth
-        // like opaque geometry: no sorting needed, no halo artifacts.
-        if (gsprites.valid) BeginShaderMode(gsprites.alphaTest);
-        DrawBarrels(&sim, &gsprites, cam);
-        DrawPickups(&sim, &gsprites, cam);
-        DrawMobs(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
-        DrawProjectiles(&sim, simAlpha, &gsprites, cam);
-        DrawBooms(&sim, &gsprites, cam);
-        DrawDoomGuy(&sim, simAlpha, &gsprites, cam, vs.yawDeg);
-        // Arch-vile flame burns on the victim for the whole channel.
-        for (int i = 0; i < sim.mobCount; i++) {
-            const Mob *m = &sim.mobs[i];
-            if (m->kind != MK_ARCHVILE || m->state != MOB_ATTACK) continue;
-            const SpriteFrame *ff = FireSpriteFrame(&gsprites, sim.tic);
-            if (!ff) break;
-            Vector3 at = (m->targetMob < 0)
-                             ? DgRenderPos(&sim, simAlpha)
-                             : MobRenderPos(&sim.mobs[m->targetMob], simAlpha);
-            DrawSpriteBillboard(cam, ff, 0, at, WHITE);
-        }
-        if (gsprites.valid) EndShaderMode();
-        DrawTracers(&sim);
         DrawPendingDrops(&sim, frame);
         bool cursorHot = false;
         int cursorCost = 0;
@@ -1396,6 +1452,26 @@ int main(int argc, char **argv)
             }
         }
         EndMode3D();
+
+        if (takeover) {
+            // His last moments, fullscreen, fading to Doom's death red.
+            DrawTexturePro(doomcamRT.texture,
+                           (Rectangle){ 0, 0, 320, -200 },
+                           (Rectangle){ 0, 0, (float)GetScreenWidth(),
+                                        (float)GetScreenHeight() },
+                           (Vector2){ 0, 0 }, 0.0f, WHITE);
+            float fade = (deathAge > 70) ? 1.0f : (float)deathAge/70.0f;
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(),
+                          (Color){ 165, 10, 10, (unsigned char)(fade*120.0f) });
+        } else if (doomcamOn && sim.dg.state != DG_EXITED) {
+            int px = 12, py = GetScreenHeight() - 212;
+            DrawTexturePro(doomcamRT.texture,
+                           (Rectangle){ 0, 0, 320, -200 },
+                           (Rectangle){ (float)px, (float)py, 320, 200 },
+                           (Vector2){ 0, 0 }, 0.0f, WHITE);
+            DrawRectangleLines(px - 1, py - 1, 322, 202, (Color){ 90, 90, 96, 255 });
+            DrawTextShadowed("DOOMCAM", px + 6, py + 4, 14, (Color){ 200, 60, 50, 255 });
+        }
         const char *intent = DgIntentLabel(&sim);
         if (intent && strncmp(intent, intentPrev, sizeof(intentPrev) - 1) != 0) {
             snprintf(intentPrev, sizeof(intentPrev), "%s", intent);
@@ -1442,6 +1518,7 @@ int main(int argc, char **argv)
 
     LogShutdown(frame, sim.tic);
     StateLogClose();
+    UnloadRenderTexture(doomcamRT);
     GameAudioUnload(&gaudio);
     CloseAudioDevice();
     GameSpritesUnload(&gsprites);

@@ -55,9 +55,10 @@ const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long ag
 const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic);
 const SpriteFrame *BarrelSpriteFrame(const GameSprites *gs, long tic);
 
-// Doom rotation index for an entity facing entAngle viewed from a camera
-// at yaw camYawDeg (degrees; doom-coords angle CCW from east).
-int SpriteRotation(float entAngleDeg, float camYawDeg);
+// Doom rotation index for an entity facing entAngle (degrees, doom coords)
+// seen by a viewer at viewerDoom. Works for the iso camera (pass its
+// world position converted to doom coords) and the first-person doomcam.
+int SpriteRotationFrom(float entAngleDeg, Vector2 viewerDoom, Vector2 entDoom);
 
 // Billboard with feet anchored at base (world coords), 1 sprite px = 1 unit.
 void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,

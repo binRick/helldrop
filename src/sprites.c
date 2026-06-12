@@ -259,12 +259,10 @@ const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic)
     return Pick(&gs->fire, (char)('A' + (tic/3) % n));
 }
 
-int SpriteRotation(float entAngleDeg, float camYawDeg)
+int SpriteRotationFrom(float entAngleDeg, Vector2 viewerDoom, Vector2 entDoom)
 {
-    // Direction from any scene point toward the (orthographic, effectively
-    // infinitely far) camera, in doom coords: (sin yaw, -cos yaw).
-    float yaw = camYawDeg*DEG2RAD;
-    float angToCam = atan2f(-cosf(yaw), sinf(yaw))*RAD2DEG;
+    float angToCam = atan2f(viewerDoom.y - entDoom.y,
+                            viewerDoom.x - entDoom.x)*RAD2DEG;
     float rel = entAngleDeg - angToCam + 22.5f;
     int rot = (int)floorf(rel/45.0f) % 8;
     if (rot < 0) rot += 8;
