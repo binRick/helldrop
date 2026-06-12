@@ -28,7 +28,10 @@ Full design rationale and roadmap: `DESIGN.md`.
   revenant, baron, arch-vile, spectre), LMB drops it at the cursor.
   Darkness is ambush terrain: monsters in sectors under light 120 are
   spotted at half range and score lower on his threat ledger; spectres
-  carry their own darkness (treated as light 80 anywhere). Match end shows the
+  carry their own darkness (treated as light 80 anywhere). TAB toggles
+  the Know-Your-Enemy codex (his published tells — every line must stay
+  true to the implementation); a floating intent label over his head
+  telegraphs his current drive and flashes on change. Match end shows the
   intermission report card (vanilla E1 PAR times in `ParSeconds`).
   `--selftest` screenshots at frame 60, or at `--exit-after N` when given. **Hell's Hand** (each on a 12s
   cooldown): F slams/holds the door — or recalls the lift — nearest the

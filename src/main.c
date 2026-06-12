@@ -771,6 +771,88 @@ static void DrawTextShadowed(const char *text, int x, int y, int size, Color col
     DrawText(text, x, y, size, color);
 }
 
+// ------------------------------------------------------- intent + codex
+
+// In-the-moment intent telegraphy: what is he doing RIGHT NOW. Loop Hero's
+// lesson — players never infer internal state from movement alone.
+static const char *DgIntentLabel(const Sim *sim)
+{
+    const DoomGuy *dg = &sim->dg;
+    switch (dg->state) {
+    case DG_FIGHT:
+        if (dg->targetMob >= 0) {
+            return TextFormat("FIGHTING %s",
+                              MobKindName(sim->mobs[dg->targetMob].kind));
+        }
+        return "FIGHTING";
+    case DG_RETREAT:   return "-> MEDKIT";
+    case DG_WAIT_DOOR: return "WAITING: DOOR";
+    case DG_WAIT_LIFT: return "WAITING: LIFT";
+    case DG_ADVANCE:
+        if (dg->objective == OBJ_WEAPON && dg->weaponPickup >= 0) {
+            switch (sim->pickups[dg->weaponPickup].type) {
+            case PK_SHOTGUN:  return "-> SHOTGUN";
+            case PK_CHAINGUN: return "-> CHAINGUN";
+            case PK_RLAUNCH:  return "-> ROCKET LAUNCHER";
+            default: break;
+            }
+        }
+        return "-> EXIT";
+    default:
+        return NULL;
+    }
+}
+
+static void DrawIntent(const Sim *sim, Camera3D cam, float alpha,
+                       const char *label, int flashFrames)
+{
+    if (!label) return;
+    Vector3 p = DgRenderPos(sim, alpha);
+    p.y += 86.0f;
+    Vector2 sp = GetWorldToScreen(p, cam);
+    if (sp.x < -200 || sp.x > GetScreenWidth() + 200 ||
+        sp.y < -50 || sp.y > GetScreenHeight() + 50) return;
+    int size = (flashFrames > 0) ? 22 : 16;
+    Color c = (flashFrames > 0) ? (Color){ 255, 240, 120, 255 }
+                                : (Color){ 190, 255, 205, 230 };
+    int w = MeasureText(label, size);
+    DrawRectangle((int)sp.x - w/2 - 5, (int)sp.y - 3, w + 10, size + 6,
+                  (Color){ 0, 0, 0, 140 });
+    DrawTextShadowed(label, (int)sp.x - w/2, (int)sp.y, size, c);
+}
+
+// The Rule-of-30 codex: his published, absolutely-true tells. Every line
+// here is a real implemented behavior — predictability IS the puzzle.
+static void DrawCodex(void)
+{
+    static const char *RULES[] = {
+        "Below 40% health he ALWAYS breaks for the nearest medkit.",
+        "He routes for every weapon he doesn't own before the exit.",
+        "He presses every switch he passes, crosses every trigger.",
+        "The arch-vile ALWAYS jumps to the top of his kill list.",
+        "He never fires rockets inside his own blast radius --",
+        "  anything hugging him switches his best weapon off.",
+        "Rockets gib corpses: he can burn your arch-vile's savings.",
+        "Monsters busy infighting are spared -- he lets them work.",
+        "A far pinky is beneath his notice; a close one is an emergency.",
+        "In sectors darker than 120 he spots monsters at HALF range.",
+        "Dead zombies feed him: their clips are his resupply.",
+    };
+    int n = (int)(sizeof(RULES)/sizeof(RULES[0]));
+    int w = 560, h = 64 + n*24;
+    int x = 24, y = GetScreenHeight()/2 - h/2;
+    DrawRectangle(x, y, w, h, (Color){ 8, 8, 10, 225 });
+    DrawRectangleLines(x, y, w, h, (Color){ 200, 60, 50, 255 });
+    DrawTextShadowed("KNOW YOUR ENEMY", x + 16, y + 12, 26,
+                     (Color){ 255, 80, 60, 255 });
+    DrawTextShadowed("his instincts are law - exploit them", x + 16, y + 42,
+                     14, GRAY);
+    for (int i = 0; i < n; i++) {
+        DrawTextShadowed(RULES[i], x + 16, y + 64 + i*24, 15,
+                         (Color){ 220, 220, 210, 255 });
+    }
+}
+
 // Vanilla episode 1 par times, the intermission's report-card yardstick.
 static int ParSeconds(const char *mapName)
 {
@@ -860,7 +942,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim, lon
 
     y += 20;
     DrawTextShadowed("WASD pan  RMB drag  wheel zoom  Q/E rotate  Z/X tilt  "
-                     "R view  G restart  ESC quit",
+                     "R view  TAB codex  G restart  ESC quit",
                      12, y, 14, GRAY);
     y += 18;
     DrawTextShadowed(TextFormat("HELL'S HAND:  F slam door %d / recall lift %d"
@@ -1131,6 +1213,9 @@ int main(int argc, char **argv)
     MobKind selectedKind = MK_PINKY;
     char dropMsg[64] = "";
     int dropMsgFrames = 0;
+    bool codexOpen = opt.selftest;   // selftest screenshots include it
+    char intentPrev[64] = "";
+    int intentFlash = 0;
     while (!WindowShouldClose()) {
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
@@ -1153,6 +1238,10 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_BARON;
         if (IsKeyPressed(KEY_NINE))  selectedKind = MK_ARCHVILE;
         if (IsKeyPressed(KEY_ZERO))  selectedKind = MK_SPECTRE;
+        if (IsKeyPressed(KEY_TAB)) {
+            codexOpen = !codexOpen;
+            LogInput(codexOpen ? "codex_open" : "codex_close");
+        }
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);
@@ -1307,8 +1396,16 @@ int main(int argc, char **argv)
             }
         }
         EndMode3D();
+        const char *intent = DgIntentLabel(&sim);
+        if (intent && strncmp(intent, intentPrev, sizeof(intentPrev) - 1) != 0) {
+            snprintf(intentPrev, sizeof(intentPrev), "%s", intent);
+            intentFlash = 30;
+        }
+        if (intentFlash > 0) intentFlash--;
+        DrawIntent(&sim, cam, simAlpha, intent, intentFlash);
         DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo);
         DrawSoulsPanel(&sim, selectedKind);
+        if (codexOpen) DrawCodex();
         FaceStateUpdate(&faceState, &sim);
         DrawStatusBar(&hud, &sim, &faceState, frame);
         if (groundOk && cursorCost > 0) {
