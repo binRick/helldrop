@@ -2456,22 +2456,68 @@ static float DgFacingErr(const DoomGuy *dg, Vector2 to)
     return err;
 }
 
-// Nearest live monster he can see from eye height, or -1. Arch-viles get
-// a steep distance discount: every Doom player kills the vile first.
+// The threat ledger (DESIGN.md): targeting reads compositions like a
+// veteran — kill the vile first, ignore the distant pinky, respect the
+// charging skull, and let infighting pairs grind each other down.
+static float DgThreatScore(const Sim *sim, int i, float dist, const bool *hasProj)
+{
+    static const float CLASS_W[MK_COUNT] = {
+        [MK_ZOMBIE] = 0.8f, [MK_SHOTGUNGUY] = 1.5f, [MK_IMP] = 1.0f,
+        [MK_PINKY] = 1.0f, [MK_CACO] = 0.8f, [MK_LOSTSOUL] = 1.1f,
+        [MK_REVENANT] = 1.7f, [MK_ARCHVILE] = 4.0f,
+    };
+    const Mob *m = &sim->mobs[i];
+    const MobInfo *inf = &MOB_INFO[m->kind];
+    float w = CLASS_W[m->kind];
+    // Melee-only monsters threaten by time-to-melee: a far pinky is a
+    // doorstop, an adjacent one is a chainsaw accident.
+    bool meleeOnly = (inf->pellets == 0 && !inf->hasMissile &&
+                      m->kind != MK_ARCHVILE && m->kind != MK_LOSTSOUL);
+    if (meleeOnly) {
+        float f = 1.0f - (dist - 120.0f)/480.0f;
+        if (f < 0.0f) f = 0.0f;
+        if (f > 1.0f) f = 1.0f;
+        w *= f;
+    }
+    if (m->kind == MK_LOSTSOUL && m->state == MOB_ATTACK) w *= 3.0f;  // incoming!
+    if (hasProj[i]) w *= 1.5f;              // its shot is already in the air
+    if (m->targetMob >= 0) w *= 0.5f;       // infighting: let them work
+    if (i == sim->dg.targetMob) w *= 1.3f;  // hysteresis: no target flicker
+    return w / (1.0f + dist/700.0f);
+}
+
+// Anything scoring under this isn't worth stopping for — far stragglers
+// get ignored while he keeps pathing.
+#define ENGAGE_THRESHOLD 0.35f
+
 static int DgPickTarget(Sim *sim)
 {
     DoomGuy *dg = &sim->dg;
+    bool hasProj[MOBS_MAX] = { false };
+    for (int i = 0; i < PROJS_MAX; i++) {
+        if (sim->projs[i].alive && sim->projs[i].ownerMob >= 0) {
+            hasProj[sim->projs[i].ownerMob] = true;
+        }
+    }
     int best = -1;
-    float bestD = SIGHT_RANGE + 100.0f;
+    float bestScore = ENGAGE_THRESHOLD;
     for (int i = 0; i < sim->mobCount; i++) {
         Mob *m = &sim->mobs[i];
         if (m->state == MOB_DEAD) continue;
-        float d = Dist2D(dg->pos, m->pos);
-        if (m->kind == MK_ARCHVILE) d *= 0.35f;
-        if (d >= bestD) continue;
+        float dist = Dist2D(dg->pos, m->pos);
+        if (dist > SIGHT_RANGE) continue;
+        float score = DgThreatScore(sim, i, dist, hasProj);
+        if (score <= bestScore) continue;   // cheap reject before the raycast
         if (!SightClearZ(sim, dg->pos, dg->z + DG_EYE, m->pos, m->z + 24.0f)) continue;
-        bestD = d;
+        bestScore = score;
         best = i;
+    }
+    if (best >= 0 && best != dg->targetMob && StateLogEnabled()) {
+        StateLogBegin("target_switch");
+        StateLogInt("tic", sim->tic);
+        StateLogStr("kind", MobKindName(sim->mobs[best].kind));
+        StateLogFloat("score", bestScore);
+        StateLogEnd();
     }
     return best;
 }
