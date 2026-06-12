@@ -293,6 +293,8 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_IMP]        = { 185,  90,  55, 255 },
     [MK_PINKY]      = { 240, 135, 160, 255 },
     [MK_CACO]       = { 215,  70,  80, 255 },
+    [MK_LOSTSOUL]   = { 235, 205, 130, 255 },
+    [MK_REVENANT]   = { 205, 195, 175, 255 },
     [MK_ARCHVILE]   = { 250, 225, 110, 255 },
 };
 
@@ -1101,7 +1103,9 @@ int main(int argc, char **argv)
         if (IsKeyPressed(KEY_THREE)) selectedKind = MK_IMP;
         if (IsKeyPressed(KEY_FOUR))  selectedKind = MK_PINKY;
         if (IsKeyPressed(KEY_FIVE))  selectedKind = MK_CACO;
-        if (IsKeyPressed(KEY_SIX))   selectedKind = MK_ARCHVILE;
+        if (IsKeyPressed(KEY_SIX))   selectedKind = MK_LOSTSOUL;
+        if (IsKeyPressed(KEY_SEVEN)) selectedKind = MK_REVENANT;
+        if (IsKeyPressed(KEY_EIGHT)) selectedKind = MK_ARCHVILE;
 
         Vector2 ground = { 0 };
         bool groundOk = MouseGroundPoint(&lm, cam, &ground);
@@ -1189,7 +1193,7 @@ int main(int argc, char **argv)
             if (opt.autodrop && sim.tic >= 250 && sim.tic % 250 == 0) {
                 // Odd waves bring an arch-vile to bank the previous wave's
                 // corpses — the smoke test for resurrection.
-                static const MobKind WAVE_A[4] = { MK_PINKY, MK_IMP, MK_CACO, MK_PINKY };
+                static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_CACO, MK_LOSTSOUL };
                 static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_ZOMBIE, MK_IMP, MK_PINKY };
                 const MobKind *wave = ((sim.tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
                 float a = sim.dg.angleDeg*DEG2RAD;

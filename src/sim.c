@@ -32,13 +32,16 @@ static void Snd(struct Sim *sim, int id, Vector2 pos)
 
 // Per-kind voice lines: sight, pain, death, melee.
 static const int MOB_SND_SIGHT[MK_COUNT] = {
-    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
+    SND_POSIT, SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT,
+    SND_SKLATK, SND_SKESIT, SND_VILSIT,
 };
 static const int MOB_SND_PAIN[MK_COUNT] = {
-    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN, SND_VIPAIN,
+    SND_POPAIN, SND_POPAIN, SND_POPAIN, SND_DMPAIN, SND_DMPAIN,
+    SND_DMPAIN, SND_POPAIN, SND_VIPAIN,
 };
 static const int MOB_SND_DEATH[MK_COUNT] = {
-    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH,
+    SND_PODTH, SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH,
+    SND_FIRXPL, SND_SKEDTH, SND_VILDTH,
 };
 
 // Vanilla-flavored bestiary stats. Damage dice follow Doom's idiom:
@@ -72,10 +75,18 @@ static const MobInfo MOB_INFO[MK_COUNT] = {
                         80.0f, 4, 10, false, 0.0f, 0,  0, false, -1, 38 },
     [MK_CACO]       = { "cacodemon",  3005, 400, 31.0f, 1.6f, 128,
                         90.0f, 10, 6,  true, 10.0f, 5,  0, true, -1, 65 },
+    // The lost soul's charge is special-cased in MobTick (no normal attack).
+    [MK_LOSTSOUL]   = { "lostsoul",   3006, 100, 16.0f, 1.7f, 256,
+                        0.0f, 0, 0,  false, 0.0f, 0,  0, true, -1, 28 },
+    [MK_REVENANT]   = { "revenant",     66, 300, 20.0f, 2.0f, 100,
+                        70.0f, 6, 10,  true, 10.0f, 10, 0, false, -1, 110 },
     // The flame attack and resurrection are special-cased in MobTick.
     [MK_ARCHVILE]   = { "archvile",     64, 700, 20.0f, 3.0f,  10,
                         0.0f, 0, 0,  false, 0.0f, 0,  0, false, -1, 220 },
 };
+
+#define SKULL_CHARGE_SPEED 16.0f
+#define SKULL_CHARGE_TICS 24
 
 #define VILE_FLAME_TICS 24      // channel length; damage lands near the end
 #define VILE_FLAME_RANGE 900.0f
@@ -1622,7 +1633,7 @@ static void FireHitscan(Sim *sim, int shooterMob, Vector2 from, float zFrom,
 
 static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
                             Vector2 at, float zAt, float speed, int damageMult,
-                            bool isRocket)
+                            bool isRocket, bool homing)
 {
     for (int i = 0; i < PROJS_MAX; i++) {
         Proj *p = &sim->projs[i];
@@ -1632,6 +1643,7 @@ static void SpawnProjectile(Sim *sim, int ownerMob, Vector2 from, float zFrom,
         Vector2 dir = { (at.x - from.x)/dist, (at.y - from.y)/dist };
         p->alive = true;
         p->isRocket = isRocket;
+        p->homing = homing;
         p->pos = p->prevPos = (Vector2){ from.x + dir.x*20.0f, from.y + dir.y*20.0f };
         p->vel = (Vector2){ dir.x*speed, dir.y*speed };
         p->z = p->prevZ = zFrom;
@@ -1714,6 +1726,22 @@ static void ProjTick(Sim *sim, Proj *p)
 {
     p->prevPos = p->pos;
     p->prevZ = p->z;
+    // Homing tracers bend toward him: clamped turn per tic, vanilla-feel.
+    if (p->homing && sim->dg.state != DG_DEAD && sim->dg.state != DG_EXITED) {
+        float speed = sqrtf(p->vel.x*p->vel.x + p->vel.y*p->vel.y);
+        float cur = atan2f(p->vel.y, p->vel.x);
+        float want = atan2f(sim->dg.pos.y - p->pos.y, sim->dg.pos.x - p->pos.x);
+        float err = want - cur;
+        while (err > PI) err -= 2.0f*PI;
+        while (err < -PI) err += 2.0f*PI;
+        float maxTurn = 4.0f*DEG2RAD;
+        if (err > maxTurn) err = maxTurn;
+        if (err < -maxTurn) err = -maxTurn;
+        cur += err;
+        p->vel = (Vector2){ cosf(cur)*speed, sinf(cur)*speed };
+        float zWant = (sim->dg.z + 24.0f) - p->z;
+        p->zVel = fmaxf(-2.0f, fminf(2.0f, zWant*0.1f));
+    }
     Vector2 next = { p->pos.x + p->vel.x, p->pos.y + p->vel.y };
     float nextZ = p->z + p->zVel;
 
@@ -1765,8 +1793,9 @@ static void ProjTick(Sim *sim, Proj *p)
         Snd(sim, SND_BAREXP, hitPos);
         RadiusBlast(sim, hitPos, 128, p->ownerMob);
     } else {
-        PushBoom(sim, (p->ownerKind == MK_CACO) ? BOOM_CACOBALL : BOOM_IMPBALL,
-                 hitPos, p->z);
+        BoomKind bk = (p->ownerKind == MK_CACO) ? BOOM_CACOBALL
+                    : (p->ownerKind == MK_REVENANT) ? BOOM_TRACER : BOOM_IMPBALL;
+        PushBoom(sim, bk, hitPos, p->z);
         Snd(sim, SND_FIRXPL, hitPos);
     }
     p->alive = false;
@@ -1971,9 +2000,11 @@ static void MobAttack(Sim *sim, int idx, Vector2 tpos, float tz, bool targetIsDG
         }
         WakeNearby(sim, m->pos, m->z + 32.0f, 500.0f);
     } else if (inf->hasMissile) {
-        Snd(sim, SND_FIRSHT, m->pos);
+        Snd(sim, (m->kind == MK_REVENANT) ? SND_SKEATK : SND_FIRSHT, m->pos);
+        // Revenant tracers home in half the time, vanilla's coin flip.
+        bool homing = (m->kind == MK_REVENANT) && (SimRandom(sim) & 1);
         SpawnProjectile(sim, idx, m->pos, m->z + 32.0f, tpos, tz + 24.0f,
-                        inf->missileSpeed, inf->missileMult, false);
+                        inf->missileSpeed, inf->missileMult, false, homing);
     }
 }
 
@@ -2027,6 +2058,26 @@ static void MobTick(Sim *sim, int idx)
         }
         break;
     case MOB_ATTACK:
+        if (m->kind == MK_LOSTSOUL) {
+            // The dive-bomb: locked heading, full speed, hit on contact.
+            Vector2 cv = { cosf(m->dodgeDir)*SKULL_CHARGE_SPEED,
+                           sinf(m->dodgeDir)*SKULL_CHARGE_SPEED };
+            MoveEntity(sim, &m->pos, m->z, inf->radius, cv, true, idx);
+            float contact = inf->radius +
+                            (targetIsDG ? DG_RADIUS : MOB_INFO[sim->mobs[m->targetMob].kind].radius);
+            if (Dist2D(m->pos, tpos) < contact + 6.0f) {
+                int dmg = (SimRandom(sim)%8 + 1) * 3;   // vanilla skull ram
+                if (targetIsDG) DamageDG(sim, dmg, idx);
+                else DamageMob(sim, m->targetMob, dmg, idx);
+                m->stateTics = 0;
+            }
+            m->stateTics--;
+            if (m->stateTics <= 0) {
+                m->state = MOB_CHASE;
+                m->attackCooldown = 35 + SimRandom(sim)%50;
+            }
+            break;
+        }
         MobFace(m, tpos, 45.0f);
         m->stateTics--;
         if (m->stateTics == 4) MobAttack(sim, idx, tpos, tz, targetIsDG, m->targetMob);
@@ -2050,8 +2101,10 @@ static void MobTick(Sim *sim, int idx)
         }
         float dist = Dist2D(m->pos, tpos);
         bool melee = (inf->meleeRange > 0.0f && dist < inf->meleeRange + inf->radius);
-        bool ranged = (inf->pellets > 0 || inf->hasMissile || m->kind == MK_ARCHVILE);
-        float reach = (m->kind == MK_ARCHVILE) ? VILE_FLAME_RANGE : 1100.0f;
+        bool ranged = (inf->pellets > 0 || inf->hasMissile ||
+                       m->kind == MK_ARCHVILE || m->kind == MK_LOSTSOUL);
+        float reach = (m->kind == MK_ARCHVILE) ? VILE_FLAME_RANGE
+                    : (m->kind == MK_LOSTSOUL) ? 600.0f : 1100.0f;
         if (m->attackCooldown <= 0 && (melee ||
             (ranged && dist < reach &&
              SightClearZ(sim, m->pos, m->z + 32.0f, tpos, tz + 24.0f)))) {
@@ -2059,8 +2112,13 @@ static void MobTick(Sim *sim, int idx)
             int gate = melee ? 256 : 70 + (int)fmaxf(0.0f, 110.0f - dist*0.09f);
             if (SimRandom(sim) < gate) {
                 m->state = MOB_ATTACK;
-                m->stateTics = (m->kind == MK_ARCHVILE) ? VILE_FLAME_TICS : 10;
+                m->stateTics = (m->kind == MK_ARCHVILE) ? VILE_FLAME_TICS
+                             : (m->kind == MK_LOSTSOUL) ? SKULL_CHARGE_TICS : 10;
                 if (m->kind == MK_ARCHVILE) Snd(sim, SND_VILATK, m->pos);
+                if (m->kind == MK_LOSTSOUL) {
+                    m->dodgeDir = atan2f(tpos.y - m->pos.y, tpos.x - m->pos.x);
+                    Snd(sim, SND_SKLATK, m->pos);
+                }
                 break;
             }
             m->attackCooldown = 6 + SimRandom(sim)%10;
@@ -2462,7 +2520,7 @@ static void DgFire(Sim *sim)
         dg->rockets--;
         Snd(sim, SND_RLAUNC, dg->pos);
         SpawnProjectile(sim, -1, dg->pos, dg->z + DG_EYE, t->pos, t->z + 24.0f,
-                        20.0f, 20, true);            // vanilla speed and dice
+                        20.0f, 20, true, false);     // vanilla speed and dice
         dg->fireCooldown = 30;
         break;
     default: {

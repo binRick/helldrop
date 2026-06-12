@@ -22,6 +22,8 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
     [MK_IMP]        = { "TROO", "ABCD",   "EFG", 'H', "IJKLM", NULL },
     [MK_PINKY]      = { "SARG", "ABCD",   "EFG", 'H', "IJKLMN", NULL },
     [MK_CACO]       = { "HEAD", "A",      "BCD", 'E', "FGHIJK", NULL },
+    [MK_LOSTSOUL]   = { "SKUL", "AB",     "CD",  'E', "FGHIJK", NULL },
+    [MK_REVENANT]   = { "SKEL", "ABCDEF", "JK",  'L', "LMNOPQ", NULL },
     [MK_ARCHVILE]   = { "VILE", "ABCDEF", "GHIJKLMNOP", 'Q', "RSTUVWXYZ", "[\\]" },
 };
 
@@ -99,6 +101,8 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal);
     SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
     SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
+    SpriteSetLoad(&gs->tracer, wad, "FATB", pal);
+    SpriteSetLoad(&gs->tracerBoom, wad, "FBXP", pal);
     SpriteSetLoad(&gs->missile, wad, "MISL", pal);
     SpriteSetLoad(&gs->barrel, wad, "BAR1", pal);
     SpriteSetLoad(&gs->fire, wad, "FIRE", pal);
@@ -119,6 +123,8 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->player);
     SpriteSetUnload(&gs->ball[0]);
     SpriteSetUnload(&gs->ball[1]);
+    SpriteSetUnload(&gs->tracer);
+    SpriteSetUnload(&gs->tracerBoom);
     SpriteSetUnload(&gs->missile);
     SpriteSetUnload(&gs->barrel);
     SpriteSetUnload(&gs->fire);
@@ -205,19 +211,23 @@ const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long ti
         if (!gs->missile.any) return NULL;
         return Pick(&gs->missile, 'A');
     }
-    const SpriteSet *set = (p->ownerKind == MK_CACO) ? &gs->ball[1] : &gs->ball[0];
+    const SpriteSet *set = (p->ownerKind == MK_CACO) ? &gs->ball[1]
+                         : (p->ownerKind == MK_REVENANT) ? &gs->tracer
+                                                         : &gs->ball[0];
     if (!set->any) return NULL;
     if (set->frames[1].present) return Pick(set, (tic/4) % 2 ? 'B' : 'A');
     return Pick(set, 'A');
 }
 
-// Explosions: MISL B-D for rockets, BAL* C-E for fireballs, ~4 tics each.
+// Explosions: MISL B-D for rockets, BAL* C-E for fireballs, FBXP A-C for
+// revenant tracers, ~4 tics each.
 const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long age)
 {
     const SpriteSet *set;
     const char *seq;
     if (kind == BOOM_ROCKET) { set = &gs->missile; seq = "BCD"; }
     else if (kind == BOOM_CACOBALL) { set = &gs->ball[1]; seq = "CDE"; }
+    else if (kind == BOOM_TRACER) { set = &gs->tracerBoom; seq = "ABC"; }
     else { set = &gs->ball[0]; seq = "CDE"; }
     if (!set->any) return NULL;
     int i = (int)(age/4);

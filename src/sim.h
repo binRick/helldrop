@@ -110,6 +110,8 @@ typedef enum MobKind {
     MK_IMP,         // 3001: fireball + claw
     MK_PINKY,       // 3002: fast melee wall
     MK_CACO,        // 3005: flyer, ball + bite
+    MK_LOSTSOUL,    // 3006: flyer, dive-bomb charge
+    MK_REVENANT,    // 66:   homing tracers — cover denial
     MK_ARCHVILE,    // 64:   flame channel + raises corpses (the Corpse Bank)
     MK_COUNT
 } MobKind;
@@ -147,6 +149,7 @@ typedef struct Mob {
 typedef enum SimSnd {
     SND_PISTOL, SND_SHOTGUN, SND_FIRSHT, SND_FIRXPL, SND_CLAW, SND_SGTATK,
     SND_POSIT, SND_BGSIT, SND_SGTSIT, SND_CACSIT, SND_VILSIT,
+    SND_SKLATK, SND_SKESIT, SND_SKEATK, SND_SKEDTH,
     SND_POPAIN, SND_DMPAIN, SND_PLPAIN, SND_VIPAIN,
     SND_PODTH, SND_BGDTH, SND_SGTDTH, SND_CACDTH, SND_VILDTH, SND_PLDETH,
     SND_DOROPN, SND_DORCLS, SND_ITEMUP, SND_WPNUP, SND_TELEPT,
@@ -166,6 +169,7 @@ typedef struct SndEvent {
 typedef struct Proj {
     bool alive;
     bool isRocket;          // his rocket: direct (1d8)*20 + 128 radius blast
+    bool homing;            // revenant tracer: curves toward Doom Guy
     Vector2 pos, prevPos;
     Vector2 vel;            // per tic
     float z, prevZ, zVel;
@@ -175,7 +179,9 @@ typedef struct Proj {
 } Proj;
 
 // Explosion flash for the renderer (deterministic sim data, cosmetic only).
-typedef enum BoomKind { BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL } BoomKind;
+typedef enum BoomKind {
+    BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL, BOOM_TRACER
+} BoomKind;
 
 typedef struct Boom {
     unsigned char kind;
