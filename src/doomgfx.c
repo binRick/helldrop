@@ -105,6 +105,17 @@ static bool PatchToTexture(const Wad *wad, const char *name,
     return DoomPatchToTexture(wad, idx, pal, out);
 }
 
+static bool PatchToHud(const Wad *wad, const char *name,
+                       const unsigned char *pal, HudPatch *out)
+{
+    int idx = WadFindLump(wad, name, 0);
+    if (idx < 0) return false;
+    out->ox = 0;
+    out->oy = 0;
+    DoomPatchInfo(wad, idx, NULL, NULL, &out->ox, &out->oy);
+    return DoomPatchToTexture(wad, idx, pal, &out->tex);
+}
+
 bool DoomHudLoad(DoomHud *hud, const Wad *wad)
 {
     memset(hud, 0, sizeof(*hud));
@@ -112,25 +123,36 @@ bool DoomHudLoad(DoomHud *hud, const Wad *wad)
     if (!DoomLoadPalette(wad, pal)) return false;
 
     hud->hasStbar = PatchToTexture(wad, "STBAR", pal, &hud->stbar);
+    hud->hasArms = PatchToTexture(wad, "STARMS", pal, &hud->arms);
+
+    hud->hasGnum = true;
+    hud->hasYnum = true;
+    for (int i = 0; i < 6; i++) {
+        char name[9];
+        snprintf(name, sizeof(name), "STGNUM%d", i + 2);
+        if (!PatchToTexture(wad, name, pal, &hud->gnum[i])) hud->hasGnum = false;
+        snprintf(name, sizeof(name), "STYSNUM%d", i + 2);
+        if (!PatchToTexture(wad, name, pal, &hud->ynum[i])) hud->hasYnum = false;
+    }
 
     hud->hasFaces = true;
     for (int t = 0; t < 5 && hud->hasFaces; t++) {
         for (int l = 0; l < 3 && hud->hasFaces; l++) {
             char name[9];
             snprintf(name, sizeof(name), "STFST%d%d", t, l);
-            hud->hasFaces = PatchToTexture(wad, name, pal, &hud->face[t][l]);
+            hud->hasFaces = PatchToHud(wad, name, pal, &hud->face[t][l]);
         }
     }
-    hud->hasDead = PatchToTexture(wad, "STFDEAD0", pal, &hud->faceDead);
+    hud->hasDead = PatchToHud(wad, "STFDEAD0", pal, &hud->faceDead);
 
     hud->hasGrin = true;
     hud->hasOuch = true;
     for (int t = 0; t < 5; t++) {
         char name[9];
         snprintf(name, sizeof(name), "STFEVL%d", t);
-        if (!PatchToTexture(wad, name, pal, &hud->faceGrin[t])) hud->hasGrin = false;
+        if (!PatchToHud(wad, name, pal, &hud->faceGrin[t])) hud->hasGrin = false;
         snprintf(name, sizeof(name), "STFOUCH%d", t);
-        if (!PatchToTexture(wad, name, pal, &hud->faceOuch[t])) hud->hasOuch = false;
+        if (!PatchToHud(wad, name, pal, &hud->faceOuch[t])) hud->hasOuch = false;
     }
 
     hud->hasDigits = true;
@@ -148,17 +170,24 @@ void DoomHudUnload(DoomHud *hud)
 {
     if (!hud) return;
     if (hud->hasStbar) UnloadTexture(hud->stbar);
+    if (hud->hasArms) UnloadTexture(hud->arms);
+    if (hud->hasGnum) {
+        for (int i = 0; i < 6; i++) UnloadTexture(hud->gnum[i]);
+    }
+    if (hud->hasYnum) {
+        for (int i = 0; i < 6; i++) UnloadTexture(hud->ynum[i]);
+    }
     if (hud->hasFaces) {
         for (int t = 0; t < 5; t++) {
-            for (int l = 0; l < 3; l++) UnloadTexture(hud->face[t][l]);
+            for (int l = 0; l < 3; l++) UnloadTexture(hud->face[t][l].tex);
         }
     }
-    if (hud->hasDead) UnloadTexture(hud->faceDead);
+    if (hud->hasDead) UnloadTexture(hud->faceDead.tex);
     if (hud->hasGrin) {
-        for (int t = 0; t < 5; t++) UnloadTexture(hud->faceGrin[t]);
+        for (int t = 0; t < 5; t++) UnloadTexture(hud->faceGrin[t].tex);
     }
     if (hud->hasOuch) {
-        for (int t = 0; t < 5; t++) UnloadTexture(hud->faceOuch[t]);
+        for (int t = 0; t < 5; t++) UnloadTexture(hud->faceOuch[t].tex);
     }
     if (hud->hasDigits) {
         for (int i = 0; i < 10; i++) UnloadTexture(hud->digit[i]);

@@ -1394,18 +1394,40 @@ static void DrawStatusBar(const DoomHud *hud, const Sim *sim, const FaceState *f
     }
 
     const DoomGuy *dg = &sim->dg;
+
+    // Single player always covers the bar's deathmatch FRAG box with the
+    // ARMS panel; slot digits go yellow as he loots the arsenal ladder.
+    if (hud->hasArms) {
+        DrawTextureEx(hud->arms, (Vector2){ (float)(x0 + 104*scale), (float)y0 },
+                      0.0f, (float)scale, WHITE);
+        if (hud->hasGnum && hud->hasYnum) {
+            bool owned[6] = { true, dg->hasShotgun, dg->hasChaingun,
+                              dg->hasRocketLauncher, false, false };
+            for (int i = 0; i < 6; i++) {
+                const Texture2D *t = owned[i] ? &hud->ynum[i] : &hud->gnum[i];
+                DrawTextureEx(*t, (Vector2){ (float)(x0 + (111 + (i%3)*12)*scale),
+                                             (float)(y0 + (4 + (i/3)*10)*scale) },
+                              0.0f, (float)scale, WHITE);
+            }
+        }
+    }
+
     int tier = (100 - dg->health)*4/100;
     if (tier < 0) tier = 0;
     if (tier > 4) tier = 4;
 
-    const Texture2D *face = NULL;
+    const HudPatch *face = NULL;
     if (dg->state == DG_DEAD && hud->hasDead) face = &hud->faceDead;
     else if (fs->ouchFrames > 0 && hud->hasOuch) face = &hud->faceOuch[tier];
     else if (fs->grinFrames > 0 && hud->hasGrin) face = &hud->faceGrin[tier];
     else if (hud->hasFaces) face = &hud->face[tier][(frame/24) % 3];
     if (face) {
-        // ST_FACESX = 143 in the 320-wide bar; faces are ~24px wide.
-        DrawTextureEx(*face, (Vector2){ (float)(x0 + 143*scale), (float)(y0 + 1*scale) },
+        // Vanilla anchor: V_DrawPatch(ST_FACESX=143, bar top) minus the
+        // patch's own offsets — face lumps carry -5,-2, landing the mug
+        // centered in the bar's face slot.
+        DrawTextureEx(face->tex,
+                      (Vector2){ (float)(x0 + (143 - face->ox)*scale),
+                                 (float)(y0 - face->oy*scale) },
                       0.0f, (float)scale, WHITE);
     }
 
