@@ -39,6 +39,8 @@ typedef struct Options {
     bool autodrop;         // dev tool: scripted drops onto his route
     long exitAfter;        // 0 = run until window close
     long turbo;            // sim speed multiplier (1 = real time)
+    const char *dumpDir;   // --dump-frames <dir>: PNG per frame (media capture)
+    long dumpEvery;        // --dump-every <N>: dump cadence in frames
 } Options;
 
 typedef struct ViewState {
@@ -58,7 +60,8 @@ static void PrintUsage(FILE *out)
 {
     fprintf(out,
         "usage: helldrop [--wad <path>] [--map <name>] [--no-log]\n"
-        "                [--selftest] [--exit-after <N>] [--turbo <N>] [--autodrop]\n");
+        "                [--selftest] [--exit-after <N>] [--turbo <N>] [--autodrop]\n"
+        "                [--dump-frames <dir>] [--dump-every <N>]\n");
 }
 
 static bool ParseArgs(int argc, char **argv, Options *opt)
@@ -72,6 +75,8 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     opt->autodrop = false;
     opt->exitAfter = 0;
     opt->turbo = 1;
+    opt->dumpDir = NULL;
+    opt->dumpEvery = 1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--wad") == 0 && i + 1 < argc) {
@@ -95,6 +100,12 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
             opt->turbo = strtol(argv[++i], &end, 10);
             if (end == argv[i] || *end != '\0' || opt->turbo <= 0 || opt->turbo > 200)
                 return false;
+        } else if (strcmp(argv[i], "--dump-frames") == 0 && i + 1 < argc) {
+            opt->dumpDir = argv[++i];
+        } else if (strcmp(argv[i], "--dump-every") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            opt->dumpEvery = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || opt->dumpEvery <= 0) return false;
         } else {
             return false;
         }
@@ -1725,8 +1736,12 @@ int main(int argc, char **argv)
 
         // Fixed 35 Hz sim: render owns wall time, feeds whole tics in.
         // The accumulator cap bounds catch-up work after hitches (and
-        // bounds --turbo to ~17 tics per rendered frame).
-        simAcc += (double)dt * (double)opt.turbo;
+        // bounds --turbo to ~17 tics per rendered frame). In frame-dump mode
+        // we ignore wall time entirely and advance exactly `turbo` tics per
+        // rendered frame, so captured footage is smooth and reproducible
+        // (per-frame PNG export would otherwise balloon dt).
+        simAcc += opt.dumpDir ? SIM_TICTIME * (double)opt.turbo
+                              : (double)dt * (double)opt.turbo;
         if (simAcc > 0.5) simAcc = 0.5;
         while (simAcc >= SIM_TICTIME) {
             SimTick(&sim);
@@ -1866,6 +1881,17 @@ int main(int argc, char **argv)
         }
         MeltDraw(&melt);
         EndDrawing();
+
+        // Media capture: a numbered PNG per (Nth) frame for stitching into
+        // GIF/MP4 with ffmpeg. Deterministic, so footage is reproducible.
+        if (opt.dumpDir && (frame % opt.dumpEvery == 0)) {
+            Image shot = LoadImageFromScreen();
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/frame_%05ld.png",
+                     opt.dumpDir, frame / opt.dumpEvery);
+            ExportImage(shot, path);
+            UnloadImage(shot);
+        }
 
         if (frame % 12 == 0) LogSnapshot(&vs, &sim);
         frame++;

@@ -48,6 +48,10 @@ Full design rationale and roadmap: `DESIGN.md`.
 - `--selftest` — loads the map, renders 60 frames, writes `selftest.png`,
   exits 0. Combine with `--turbo 8` to screenshot mid-simulation. Use this
   (then Read the png) to verify changes without user interaction.
+- `--dump-frames <dir> [--dump-every N]` — writes `frame_%05d.png` per (Nth)
+  rendered frame for stitching gameplay GIF/MP4 with ffmpeg. In this mode the
+  sim advances a FIXED `turbo` tics per frame (ignoring wall clock), so
+  footage is smooth and reproducible. Media for the README lives in `media/`.
 - In-game: G restarts the sim (deterministic — same playout). 1–9 and 0
   select a monster (zombieman, shotgunguy, imp, pinky, caco, lost soul,
   revenant, baron, arch-vile, spectre), LMB drops it at the cursor.
