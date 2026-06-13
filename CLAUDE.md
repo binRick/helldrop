@@ -15,6 +15,11 @@ Full design rationale and roadmap: `DESIGN.md`.
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —
   keeps their terminal visible).
+- **Authentic art**: every visual/sound decodes from the loaded WAD, so the
+  game looks exactly like Doom when given id's IWAD. Auto-detect prefers
+  `assets/DOOM.WAD` (any case, or doom1.wad) and the default macOS Steam
+  install paths over the bundled Freedoom; `--wad` overrides. id's assets
+  are copyrighted — never vendor them into the repo.
 - Default launch is the **campaign** ("Knee-Deep in His Blood"): E1M1→E1M8
   with the bestiary unlocking per level (`UnlockMaskFor`); win + SPACE
   advances, progress persists in `helldrop.sav` (gitignored). Killing him

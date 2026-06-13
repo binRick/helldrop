@@ -54,7 +54,8 @@ static const char *ALPHA_TEST_FS =
     "    finalColor = t*colDiffuse*fragColor;\n"
     "}\n";
 
-static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex, bool mirror)
+static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex,
+                        bool mirror, short botOfs)
 {
     if (frame < 0 || frame >= SPR_FRAMES) return;
     SpriteFrame *f = &set->frames[frame];
@@ -62,10 +63,12 @@ static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex, bool 
         for (int r = 0; r < 8; r++) {
             f->tex[r] = tex;
             f->mirror[r] = false;
+            f->botOfs[r] = botOfs;
         }
     } else if (rot >= 1 && rot <= 8) {
         f->tex[rot - 1] = tex;
         f->mirror[rot - 1] = mirror;
+        f->botOfs[rot - 1] = botOfs;
     } else {
         return;
     }
@@ -83,9 +86,12 @@ static void SpriteSetLoad(SpriteSet *set, const Wad *wad, const char *name4,
         if ((len != 6 && len != 8) || strncmp(n, name4, 4) != 0) continue;
         Texture2D tex;
         if (!DoomPatchToTexture(wad, i, pal, &tex)) continue;
+        int w = 0, h = 0, lo = 0, to = 0;
+        DoomPatchInfo(wad, i, &w, &h, &lo, &to);
+        short botOfs = (short)(to - h);
         if (set->ownedCount < SPR_FRAMES*8) set->owned[set->ownedCount++] = tex;
-        SetRegister(set, n[4] - 'A', n[5] - '0', tex, false);
-        if (len == 8) SetRegister(set, n[6] - 'A', n[7] - '0', tex, true);
+        SetRegister(set, n[4] - 'A', n[5] - '0', tex, false, botOfs);
+        if (len == 8) SetRegister(set, n[6] - 'A', n[7] - '0', tex, true, botOfs);
     }
 }
 
@@ -288,7 +294,10 @@ void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
     }
     float w = (float)tex.width, h = (float)tex.height;
     Rectangle src = { 0, 0, f->mirror[rot] ? -w : w, h };
-    Vector3 center = { base.x, base.y + h*0.5f, base.z };
+    // Authentic anchoring: the patch's topoffset places the sprite bottom
+    // relative to the entity origin (cacos hang, fireballs center, feet
+    // plant) — exactly as Doom positions them.
+    Vector3 center = { base.x, base.y + h*0.5f + (float)f->botOfs[rot], base.z };
     DrawBillboardPro(cam, tex, src, center, (Vector3){ 0.0f, 1.0f, 0.0f },
                      (Vector2){ w, h }, (Vector2){ w*0.5f, h*0.5f }, 0.0f, tint);
 }

@@ -17,6 +17,8 @@
 typedef struct SpriteFrame {
     Texture2D tex[8];   // by rotation, 0 = facing the viewer
     bool mirror[8];
+    short botOfs[8];    // authentic patch offsets: sprite bottom relative
+                        // to the entity origin (topoffset - height)
     bool present;
 } SpriteFrame;
 

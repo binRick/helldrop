@@ -26,5 +26,11 @@ void DoomHudUnload(DoomHud *hud);
 bool DoomLoadPalette(const Wad *wad, unsigned char pal[768]);
 bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
                         const unsigned char *pal, Texture2D *out);
+// CPU-side decode (RGBA8 Image); caller owns/unloads the Image.
+bool DoomPatchToImage(const Wad *wad, int lumpIndex,
+                      const unsigned char *pal, Image *out);
+// Header only: dimensions and the sprite's drawing offsets.
+bool DoomPatchInfo(const Wad *wad, int lumpIndex,
+                   int *w, int *h, int *leftOfs, int *topOfs);
 
 #endif

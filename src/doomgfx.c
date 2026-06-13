@@ -28,8 +28,8 @@ bool DoomLoadPalette(const Wad *wad, unsigned char pal[768])
 
 // Decode one Doom picture-format ("patch") lump into RGBA. Hostile data is
 // only ever skipped, never trusted: every offset is bounds-checked.
-bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
-                        const unsigned char *pal, Texture2D *out)
+bool DoomPatchToImage(const Wad *wad, int lumpIndex,
+                      const unsigned char *pal, Image *out)
 {
     int size = 0;
     const unsigned char *d = WadLumpData(wad, lumpIndex, &size);
@@ -65,17 +65,36 @@ bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
         }
     }
 
-    Image img = {
-        .data = rgba,
-        .width = w,
-        .height = h,
-        .mipmaps = 1,
-        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8,
-    };
+    out->data = rgba;
+    out->width = w;
+    out->height = h;
+    out->mipmaps = 1;
+    out->format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8;
+    return true;
+}
+
+bool DoomPatchToTexture(const Wad *wad, int lumpIndex,
+                        const unsigned char *pal, Texture2D *out)
+{
+    Image img;
+    if (!DoomPatchToImage(wad, lumpIndex, pal, &img)) return false;
     *out = LoadTextureFromImage(img);
     SetTextureFilter(*out, TEXTURE_FILTER_POINT);
-    free(rgba);
+    UnloadImage(img);
     return out->id != 0;
+}
+
+bool DoomPatchInfo(const Wad *wad, int lumpIndex,
+                   int *w, int *h, int *leftOfs, int *topOfs)
+{
+    int size = 0;
+    const unsigned char *d = WadLumpData(wad, lumpIndex, &size);
+    if (!d || size < 8) return false;
+    if (w) *w = ReadLE16(d);
+    if (h) *h = ReadLE16(d + 2);
+    if (leftOfs) *leftOfs = (int16_t)ReadLE16(d + 4);
+    if (topOfs) *topOfs = (int16_t)ReadLE16(d + 6);
+    return true;
 }
 
 static bool PatchToTexture(const Wad *wad, const char *name,

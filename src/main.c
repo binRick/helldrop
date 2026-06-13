@@ -31,6 +31,7 @@
 
 typedef struct Options {
     const char *wadPath;
+    bool wadExplicit;      // --wad given: skip DOOM.WAD auto-detection
     const char *mapName;
     bool mapExplicit;      // --map given: single-level mode, all unlocked
     bool noLog;
@@ -63,6 +64,7 @@ static void PrintUsage(FILE *out)
 static bool ParseArgs(int argc, char **argv, Options *opt)
 {
     opt->wadPath = "assets/freedoom1.wad";
+    opt->wadExplicit = false;
     opt->mapName = "E1M1";
     opt->mapExplicit = false;
     opt->noLog = false;
@@ -74,6 +76,7 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--wad") == 0 && i + 1 < argc) {
             opt->wadPath = argv[++i];
+            opt->wadExplicit = true;
         } else if (strcmp(argv[i], "--map") == 0 && i + 1 < argc) {
             opt->mapName = argv[++i];
             opt->mapExplicit = true;
@@ -103,6 +106,39 @@ static const char *PathBasename(const char *path)
 {
     const char *slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
+}
+
+// If the user owns the real thing, use it: every lump we decode (sprites,
+// sounds, mugshot, status bar) comes from the WAD, so pointing at an id
+// IWAD makes the game look exactly like Doom. We only bundle Freedoom
+// because id's assets cannot be redistributed. E1-campaign-compatible
+// IWADs only (DOOM2.WAD lacks E1M1 — use it via --wad --map MAPxx).
+static const char *AutoDetectWad(void)
+{
+    static char buf[512];
+    static const char *LOCAL[] = {
+        "assets/DOOM.WAD", "assets/doom.wad",
+        "assets/DOOM1.WAD", "assets/doom1.wad",
+    };
+    for (size_t i = 0; i < sizeof(LOCAL)/sizeof(LOCAL[0]); i++) {
+        if (FileExists(LOCAL[i])) return LOCAL[i];
+    }
+    const char *home = getenv("HOME");
+    if (home) {
+        static const char *STEAM[] = {
+            "%s/Library/Application Support/Steam/steamapps/common/"
+            "Ultimate Doom/base/DOOM.WAD",
+            "%s/Library/Application Support/Steam/steamapps/common/"
+            "Doom/base/DOOM.WAD",
+            "%s/Library/Application Support/Steam/steamapps/common/"
+            "DOOM + DOOM II/rerelease/DOOM.WAD",
+        };
+        for (size_t i = 0; i < sizeof(STEAM)/sizeof(STEAM[0]); i++) {
+            snprintf(buf, sizeof(buf), STEAM[i], home);
+            if (FileExists(buf)) return buf;
+        }
+    }
+    return NULL;
 }
 
 // ---------------------------------------------------------------- things
@@ -387,9 +423,8 @@ static void DrawProjectiles(const Sim *sim, float alpha, const GameSprites *gs,
         float z = p->prevZ + (p->z - p->prevZ)*alpha;
         const SpriteFrame *f = gs->valid ? ProjSpriteFrame(gs, p, sim->tic) : NULL;
         if (f) {
-            // Balls anchor centered, not feet-planted: drop the base by half.
-            float h = (float)f->tex[0].height;
-            DrawSpriteBillboard(cam, f, 0, (Vector3){ x, z - h*0.5f, -y }, WHITE);
+            // The patch offsets center missiles on their origin (authentic).
+            DrawSpriteBillboard(cam, f, 0, (Vector3){ x, z, -y }, WHITE);
         } else {
             Color c = p->isRocket ? (Color){ 220, 220, 220, 255 }
                     : (p->ownerKind == MK_CACO) ? (Color){ 255, 60, 60, 255 }
@@ -409,10 +444,8 @@ static void DrawBooms(const Sim *sim, const GameSprites *gs, Camera3D cam)
                                    ? BoomSpriteFrame(gs, (BoomKind)b->kind, age)
                                    : NULL;
         if (f) {
-            float h = (float)f->tex[0].height;
             DrawSpriteBillboard(cam, f, 0,
-                                (Vector3){ b->pos.x, b->z - h*0.5f, -b->pos.y },
-                                WHITE);
+                                (Vector3){ b->pos.x, b->z, -b->pos.y }, WHITE);
         } else {
             float r = 20.0f + (float)age*6.0f;
             unsigned char a = (unsigned char)(220 - age*18);
@@ -1431,6 +1464,16 @@ int main(int argc, char **argv)
     Wad wad = { 0 };
     DoomMap map = { 0 };
     LevelMesh lm = { 0 };
+
+    // Prefer the player's own id IWAD when present: instant authentic art.
+    if (!opt.wadExplicit) {
+        const char *real = AutoDetectWad();
+        if (real) {
+            opt.wadPath = real;
+            TraceLog(LOG_INFO, "MAIN: found id IWAD, using authentic DOOM art: %s",
+                     real);
+        }
+    }
 
     // Campaign mode unless --map pins a single level; progress persists in
     // a one-line save file beside the binary.
