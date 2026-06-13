@@ -38,7 +38,15 @@ ICON_MASTER = assets/icon.png
 FREEDOOM_VERSION = 0.13.0
 WAD = assets/freedoom1.wad
 
-game: $(BIN) $(ICNS) $(PLIST) $(WAD)
+# The Helldrop asset pack: our own redistributable WAD, assembled from the
+# Freedoom base plus the override lumps committed under assets/helldrop/.
+# Built by tools/mkwad (reuses the engine's wad + doomgfx decoders). Unlike
+# an id IWAD this is legal to ship; the loader prefers it over raw Freedoom.
+MKWAD        = tools/mkwad
+HELLDROP_WAD = assets/helldrop.wad
+HELLDROP_SRC = $(wildcard assets/helldrop/*.txt assets/helldrop/*.lmp assets/helldrop/graphics/*.png)
+
+game: $(BIN) $(ICNS) $(PLIST) $(WAD) $(HELLDROP_WAD)
 
 $(APP)/Contents/MacOS:
 	mkdir -p $@
@@ -101,6 +109,20 @@ $(WAD):
 	unzip -p /tmp/freedoom-dl.zip freedoom-$(FREEDOOM_VERSION)/freedoom1.wad > $(WAD)
 	@rm -f /tmp/freedoom-dl.zip
 
+# WAD assembler: links the engine's own wad + doomgfx decoders so the patch
+# codec and palette logic stay in one place. Headless (CPU-only raylib).
+$(MKWAD): tools/mkwad.c src/wad.c src/doomgfx.c $(RAYLIB_A) $(HDRS)
+	$(CC) $(CFLAGS) tools/mkwad.c src/wad.c src/doomgfx.c $(LDFLAGS) -o $(MKWAD)
+
+$(HELLDROP_WAD): $(MKWAD) $(WAD) $(HELLDROP_SRC)
+	$(MKWAD) build $(WAD) assets/helldrop $(HELLDROP_WAD)
+
+# Re-derive the tinted HUD source art from the current Freedoom base.
+# Run once after a Freedoom version bump; the PNGs are committed.
+bake-hud: $(MKWAD) $(WAD)
+	@mkdir -p assets/helldrop/graphics
+	$(MKWAD) bake $(WAD) assets/helldrop/graphics
+
 # Optional: Doom 2 assets for the heavy bestiary's sprites/sounds.
 # Usage: make assets/freedoom2.wad, then --wad assets/freedoom2.wad --map MAP01
 assets/freedoom2.wad:
@@ -110,9 +132,9 @@ assets/freedoom2.wad:
 	@rm -f /tmp/freedoom-dl.zip
 
 clean:
-	rm -rf $(APP) selftest.png logs
+	rm -rf $(APP) selftest.png logs $(MKWAD)
 
 distclean: clean
-	rm -rf vendor assets/freedoom1.wad
+	rm -rf vendor assets/freedoom1.wad $(HELLDROP_WAD)
 
-.PHONY: game clean distclean
+.PHONY: game clean distclean bake-hud

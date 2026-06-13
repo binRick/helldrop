@@ -1487,9 +1487,13 @@ int main(int argc, char **argv)
     DoomMap map = { 0 };
     LevelMesh lm = { 0 };
 
-    // Prefer the player's own id IWAD when present: instant authentic art.
-    // Doom 2 map names (MAPxx) reach for DOOM2.WAD; the E1 campaign needs a
-    // Doom 1 IWAD (DOOM2.WAD has no E1M1).
+    // WAD precedence when the user didn't pass --wad:
+    //   1. an id IWAD, if present -> the exact Doom look (their own copy)
+    //   2. assets/helldrop.wad    -> our shippable Freedoom-based pack
+    //   3. assets/freedoom1.wad   -> the raw bundled fallback (the default)
+    // Doom 2 map names (MAPxx) need a Doom 2 IWAD; the E1 campaign needs a
+    // Doom 1 IWAD (DOOM2.WAD has no E1M1), so helldrop.wad (E1 maps) applies
+    // only to the Doom 1 side.
     if (!opt.wadExplicit) {
         const char *real = NULL;
         if (strncmp(opt.mapName, "MAP", 3) == 0) {
@@ -1498,10 +1502,11 @@ int main(int argc, char **argv)
             else if (FileExists("assets/freedoom2.wad")) real = "assets/freedoom2.wad";
         } else {
             real = AutoDetectWad();
+            if (!real && FileExists("assets/helldrop.wad")) real = "assets/helldrop.wad";
         }
         if (real) {
             opt.wadPath = real;
-            TraceLog(LOG_INFO, "MAIN: auto-selected IWAD: %s", real);
+            TraceLog(LOG_INFO, "MAIN: auto-selected WAD: %s", real);
         }
     }
 

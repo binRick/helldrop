@@ -16,10 +16,24 @@ Full design rationale and roadmap: `DESIGN.md`.
   inside it. The window spawns at the monitor's left edge (user preference —
   keeps their terminal visible).
 - **Authentic art**: every visual/sound decodes from the loaded WAD, so the
-  game looks exactly like Doom when given id's IWAD. Auto-detect prefers
-  `assets/DOOM.WAD` (any case, or doom1.wad) and the default macOS Steam
-  install paths over the bundled Freedoom; `--wad` overrides. id's assets
-  are copyrighted — never vendor them into the repo.
+  game looks exactly like Doom when given id's IWAD. WAD precedence when no
+  `--wad`: an id IWAD (auto-detected — `assets/DOOM.WAD` any case/doom1.wad,
+  or the macOS Steam paths; `assets/DOOM2.WAD` for `--map MAPxx`) →
+  `assets/helldrop.wad` (our pack) → `assets/freedoom1.wad` (raw fallback).
+  id's assets are copyrighted — never vendor them into the repo; the
+  gitignore blocks `assets/*.wad`.
+- **The Helldrop asset pack** (`assets/helldrop.wad`): our own
+  redistributable WAD, assembled by `tools/mkwad` from the Freedoom base
+  (BSD) plus the override lumps committed under `assets/helldrop/`
+  (`CREDITS.txt` → CREDITS lump; `graphics/*.png` → Doom patches via the
+  base PLAYPAL; raw `*.lmp`/`*.txt`). Unlike an id IWAD this is legal to
+  ship. `make assets/helldrop.wad` builds it (a gitignored, reproducible
+  artifact); `make bake-hud` re-derives the tinted HUD source PNGs
+  (STBAR/STARMS — the hell-forged reskin) from the current Freedoom base
+  after a version bump. mkwad reuses the engine's own `wad.c`/`doomgfx.c`
+  decoders, so the patch codec lives in one place. To reskin anything, drop
+  a PNG named for the lump into `assets/helldrop/graphics/` (optional
+  `NAME.png.ofs` = "left top" for sprite offsets) and rebuild.
 - Default launch is the **campaign** ("Knee-Deep in His Blood"): E1M1→E1M8
   with the bestiary unlocking per level (`UnlockMaskFor`); win + SPACE
   advances, progress persists in `helldrop.sav` (gitignored). Killing him
