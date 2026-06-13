@@ -1466,12 +1466,20 @@ int main(int argc, char **argv)
     LevelMesh lm = { 0 };
 
     // Prefer the player's own id IWAD when present: instant authentic art.
+    // Doom 2 map names (MAPxx) reach for DOOM2.WAD; the E1 campaign needs a
+    // Doom 1 IWAD (DOOM2.WAD has no E1M1).
     if (!opt.wadExplicit) {
-        const char *real = AutoDetectWad();
+        const char *real = NULL;
+        if (strncmp(opt.mapName, "MAP", 3) == 0) {
+            if (FileExists("assets/DOOM2.WAD")) real = "assets/DOOM2.WAD";
+            else if (FileExists("assets/doom2.wad")) real = "assets/doom2.wad";
+            else if (FileExists("assets/freedoom2.wad")) real = "assets/freedoom2.wad";
+        } else {
+            real = AutoDetectWad();
+        }
         if (real) {
             opt.wadPath = real;
-            TraceLog(LOG_INFO, "MAIN: found id IWAD, using authentic DOOM art: %s",
-                     real);
+            TraceLog(LOG_INFO, "MAIN: auto-selected IWAD: %s", real);
         }
     }
 

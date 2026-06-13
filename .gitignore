@@ -1,9 +1,9 @@
 Helldrop.app/
 vendor/
 logs/
-assets/freedoom1.wad
 selftest.png
 *.dSYM/
 .DS_Store
 helldrop.sav
-assets/freedoom2.wad
+assets/*.wad
+assets/*.WAD
