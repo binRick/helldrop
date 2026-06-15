@@ -19,6 +19,10 @@
 #include "sound.h"
 #include "statelog.h"
 
+#ifdef PLATFORM_WEB
+#include <emscripten/emscripten.h>
+#endif
+
 #define HELLDROP_VERSION "0.1.0"
 
 #define CAM_DIST   4000.0f   // keeps the ortho camera outside all geometry
@@ -1475,13 +1479,58 @@ static bool MouseGroundPoint(const LevelMesh *lm, Camera3D cam, Vector2 *out)
 
 // ---------------------------------------------------------------- main
 
+// ---- Loop state hoisted to file scope so one per-frame step can be driven
+// by emscripten_set_main_loop() on web. On native this is identical to the
+// previous locals (same zero/explicit initialisation, single-threaded). ----
+static Options opt;
+static Wad wad;
+static DoomMap map;
+static LevelMesh lm;
+static float *thingHeights;
+static Sim sim;
+static ViewState vs;
+static DoomHud hud;
+static FaceState faceState = { .prevHealth = 100, .hpRef = 100, .hpRefFrames = 35 };
+static GameSprites gsprites;
+static GameAudio gaudio;
+static long frame;
+static double simAcc;
+static MobKind selectedKind = MK_PINKY;
+static char dropMsg[64];
+static int dropMsgFrames;
+static bool codexOpen;
+static char intentPrev[64];
+static int intentFlash;
+static bool doomcamOn = true;
+static RenderTexture2D doomcamRT;
+static bool campaignComplete;
+static unsigned unlocked;
+static Melt melt;
+static bool campaign;
+static char curMap[9];
+
+static bool HelldropFrame(void);   // one game-loop iteration (false => stop)
+static void MainCleanup(void);
+#ifdef PLATFORM_WEB
+static void HelldropFrameWeb(void);
+#endif
+
 int main(int argc, char **argv)
 {
-    Options opt;
     if (!ParseArgs(argc, argv, &opt)) {
         PrintUsage(stderr);
         return 2;
     }
+
+#ifdef PLATFORM_WEB
+    // The web build takes no CLI args: run a single, fully-unlocked level (the
+    // most immediately playable demo) from our shippable WAD, and skip the
+    // on-disk debug log — the browser has no writable working directory.
+    opt.mapExplicit = true;          // single level -> everything unlocked
+    opt.noLog = true;
+    opt.wadPath = "assets/helldrop.wad";
+    opt.wadExplicit = true;          // no IWAD auto-detection on web
+#endif
 
     if (!opt.noLog && !StateLogOpen(NULL)) {
         fprintf(stderr, "helldrop: state log unavailable, continuing without\n");
@@ -1490,14 +1539,19 @@ int main(int argc, char **argv)
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     InitWindow(1600, 900, "HELLDROP");
+#ifdef PLATFORM_WEB
+    // requestAnimationFrame drives cadence on web; calling SetTargetFPS would
+    // make raylib's EndDrawing() block in WaitTime()->emscripten_sleep, which
+    // needs ASYNCIFY (which we deliberately avoid). ESC must also not trip the
+    // default raylib exit key and cancel the canvas-hosted loop.
+    SetExitKey(KEY_NULL);
+#else
     SetTargetFPS(60);
     // Left edge of the monitor so the terminal stays visible alongside.
     SetWindowPosition(8, (GetMonitorHeight(GetCurrentMonitor()) - 900)/2);
+#endif
 
-    Wad wad = { 0 };
-    DoomMap map = { 0 };
-    LevelMesh lm = { 0 };
-
+    // wad/map/lm live at file scope (above); the loader fills them below.
     // WAD precedence when the user didn't pass --wad:
     //   1. an id IWAD, if present -> the exact Doom look (their own copy)
     //   2. assets/helldrop.wad    -> our shippable Freedoom-based pack
@@ -1523,8 +1577,7 @@ int main(int argc, char **argv)
 
     // Campaign mode unless --map pins a single level; progress persists in
     // a one-line save file beside the binary.
-    bool campaign = !opt.mapExplicit;
-    char curMap[9];
+    campaign = !opt.mapExplicit;
     snprintf(curMap, sizeof(curMap), "%s", opt.mapName);
     if (campaign) CampaignLoad(curMap, sizeof(curMap));
 
@@ -1551,10 +1604,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    float *thingHeights = ComputeThingHeights(&map, &lm.floors);
+    thingHeights = ComputeThingHeights(&map, &lm.floors);
     LogLevelLoaded(&opt, &map, &lm);
 
-    Sim sim = { 0 };
     if (!SimInit(&sim, &map, &lm)) {
         TraceLog(LOG_ERROR, "MAIN: failed to init sim");
         free(thingHeights);
@@ -1566,40 +1618,51 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    ViewState vs = { 0 };
     SetupView(&vs, &map);
 
-    DoomHud hud = { 0 };
     if (!DoomHudLoad(&hud, &wad)) {
         TraceLog(LOG_WARNING, "MAIN: no status-bar graphics in WAD, using fallback HUD");
     }
-    FaceState faceState = { .prevHealth = 100, .hpRef = 100, .hpRefFrames = 35 };
 
-    GameSprites gsprites = { 0 };
     if (!GameSpritesLoad(&gsprites, &wad)) {
         TraceLog(LOG_WARNING, "MAIN: no sprites in WAD, using shape renderer");
     }
     InitAudioDevice();
-    GameAudio gaudio = { 0 };
     GameAudioLoad(&gaudio, &wad);
 
-    long frame = 0;
-    double simAcc = 0.0;
-    MobKind selectedKind = MK_PINKY;
-    char dropMsg[64] = "";
-    int dropMsgFrames = 0;
-    bool codexOpen = opt.selftest;   // selftest screenshots include it
-    char intentPrev[64] = "";
-    int intentFlash = 0;
-    bool doomcamOn = true;
-    RenderTexture2D doomcamRT = LoadRenderTexture(320, 200);
+    frame = 0;
+    simAcc = 0.0;
+    selectedKind = MK_PINKY;
+    dropMsg[0] = '\0';
+    dropMsgFrames = 0;
+    codexOpen = opt.selftest;        // selftest screenshots include it
+    intentPrev[0] = '\0';
+    intentFlash = 0;
+    doomcamOn = true;
+    doomcamRT = LoadRenderTexture(320, 200);
     SetTextureFilter(doomcamRT.texture, TEXTURE_FILTER_POINT);
-    bool campaignComplete = false;
-    unsigned unlocked = campaign ? UnlockMaskFor(curMap) : 0xFFFFFFFFu;
+    campaignComplete = false;
+    unlocked = campaign ? UnlockMaskFor(curMap) : 0xFFFFFFFFu;
     if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
-    Melt melt = { 0 };
     SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
-    while (!WindowShouldClose()) {
+
+#ifdef PLATFORM_WEB
+    // requestAnimationFrame-driven (fps=0); simulate_infinite_loop=1 means this
+    // never returns and the browser owns the frame cadence.
+    emscripten_set_main_loop(HelldropFrameWeb, 0, 1);
+#else
+    while (!WindowShouldClose())
+        if (!HelldropFrame()) break;
+    MainCleanup();
+#endif
+    return 0;
+}
+
+// One iteration of the game loop. Returns false to stop (the native break
+// paths: level-load failure, selftest/exit-after). State lives at file scope
+// so emscripten_set_main_loop() can invoke this once per browser frame.
+static bool HelldropFrame(void)
+{
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
         CameraUpdate(&vs, dt);
@@ -1657,7 +1720,7 @@ int main(int argc, char **argv)
                 CampaignSave(curMap);
                 if (!ReloadLevel(&wad, curMap, &map, &lm, &sim, &thingHeights)) {
                     TraceLog(LOG_ERROR, "MAIN: failed to load '%s'", curMap);
-                    break;
+                    return false;
                 }
                 SetupView(&vs, &map);
                 unlocked = UnlockMaskFor(curMap);
@@ -1665,7 +1728,7 @@ int main(int argc, char **argv)
                 simAcc = 0.0;
                 intentPrev[0] = '\0';
                 SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
-                continue;
+                return true;
             }
         }
         if (IsKeyPressed(KEY_TAB)) {
@@ -1903,11 +1966,14 @@ int main(int argc, char **argv)
                 StateLogStr("screenshot", "selftest.png");
                 StateLogEnd();
             }
-            break;
+            return false;
         }
-        if (!opt.selftest && opt.exitAfter > 0 && frame >= opt.exitAfter) break;
-    }
+        if (!opt.selftest && opt.exitAfter > 0 && frame >= opt.exitAfter) return false;
+        return true;
+}
 
+static void MainCleanup(void)
+{
     LogShutdown(frame, sim.tic);
     StateLogClose();
     if (melt.tex.id != 0) UnloadTexture(melt.tex);
@@ -1922,5 +1988,17 @@ int main(int argc, char **argv)
     MapFree(&map);
     WadFree(&wad);
     CloseWindow();
-    return 0;
 }
+
+#ifdef PLATFORM_WEB
+static void HelldropFrameWeb(void)
+{
+    // No native window-close button on web; in practice HelldropFrame never
+    // returns false here (selftest / exit-after are CLI-only), so this runs
+    // for the lifetime of the page.
+    if (WindowShouldClose() || !HelldropFrame()) {
+        MainCleanup();
+        emscripten_cancel_main_loop();
+    }
+}
+#endif

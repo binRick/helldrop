@@ -131,10 +131,68 @@ assets/freedoom2.wad:
 	unzip -p /tmp/freedoom-dl.zip freedoom-$(FREEDOOM_VERSION)/freedoom2.wad > assets/freedoom2.wad
 	@rm -f /tmp/freedoom-dl.zip
 
+# ─── Web build (Emscripten / WebAssembly) ──────────────────────────────────
+# Same single-source raylib tree (RAYLIB_TAG), built a second time for
+# PLATFORM_WEB into libraylib.web.a (coexists with the macOS .a). The whole
+# game is portable C — no platform .m files — so it cross-compiles unchanged;
+# main.c swaps its loop for emscripten_set_main_loop under PLATFORM_WEB.
+# Requires emscripten on PATH (emcc/emmake). Then:
+#   make web          # builds dist-web/index.{html,js,wasm,data}
+#   make web-serve    # builds, then serves dist-web/ on http://localhost:8000/
+# The shippable helldrop.wad is baked into the .data via --preload-file, so
+# the browser build is self-contained (Freedoom-based, legal to ship).
+WEBDIR       = dist-web
+RAYLIB_WEB_A = $(RAYLIB_SRC)/src/libraylib.web.a
+WEBSHELL     = web/shell.html
+
+# GRAPHICS_API_OPENGL_ES3 pairs with WebGL 2 (the alpha-test sprite shader has
+# a matching GLSL ES 3.00 variant). USE_GLFW=3 is raylib's web windowing.
+WEBCFLAGS = -O2 -Wall -Wno-unused-result -std=c11 \
+            -I$(RAYLIB_SRC)/src -I$(TESS_DIR)/Include -Isrc \
+            -DPLATFORM_WEB -DGRAPHICS_API_OPENGL_ES3
+# ASYNCIFY is required by raylib's web audio backend: miniaudio spins on
+# emscripten_sleep() while the WebAudio device initialises (and rcore_web does
+# the same on context loss). The render loop itself stays rAF-driven, so we do
+# NOT call SetTargetFPS on web (that would add a per-frame asyncify sleep).
+WEBLDFLAGS = -s USE_GLFW=3 \
+             -s MIN_WEBGL_VERSION=2 -s MAX_WEBGL_VERSION=2 \
+             -s FORCE_FILESYSTEM=1 \
+             -s ALLOW_MEMORY_GROWTH=1 \
+             -s INITIAL_MEMORY=268435456 \
+             -s STACK_SIZE=1048576 \
+             -s ASYNCIFY \
+             --preload-file $(HELLDROP_WAD)@assets/helldrop.wad \
+             --shell-file $(WEBSHELL)
+
+web: $(WEBDIR)/index.html
+	@echo "Built $(WEBDIR)/index.html — serve with: make web-serve"
+
+$(WEBDIR):
+	mkdir -p $(WEBDIR)
+
+# raylib's web build emits libraylib.web.a directly (no clobber of the .mac.a).
+$(RAYLIB_WEB_A): | $(RAYLIB_SRC)
+	@command -v emcc >/dev/null || { echo "error: emcc not on PATH — activate emscripten (emsdk_env.sh)"; exit 1; }
+	@echo "==> Building raylib $(RAYLIB_TAG) for web (first run only, ~1 min)"
+	cd $(RAYLIB_SRC)/src && emmake $(MAKE) PLATFORM=PLATFORM_WEB GRAPHICS=GRAPHICS_API_OPENGL_ES3 -B
+
+web-raylib: $(RAYLIB_WEB_A)
+
+$(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(HELLDROP_WAD) | $(WEBDIR)
+	@command -v emcc >/dev/null || { echo "error: emcc not on PATH — activate emscripten (emsdk_env.sh)"; exit 1; }
+	emcc $(SRC) $(RAYLIB_WEB_A) $(WEBCFLAGS) $(WEBLDFLAGS) -o $@
+
+web-serve: web
+	@echo "Serving $(WEBDIR) at http://localhost:8000/ — Ctrl-C to stop"
+	@cd $(WEBDIR) && python3 -m http.server 8000
+
+web-clean:
+	rm -rf $(WEBDIR)
+
 clean:
-	rm -rf $(APP) selftest.png logs $(MKWAD)
+	rm -rf $(APP) selftest.png logs $(MKWAD) $(WEBDIR)
 
 distclean: clean
 	rm -rf vendor assets/freedoom1.wad $(HELLDROP_WAD)
 
-.PHONY: game clean distclean bake-hud
+.PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean
