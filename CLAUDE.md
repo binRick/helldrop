@@ -21,6 +21,11 @@ Full design rationale and roadmap: `DESIGN.md`.
   WebAudio init spins on `emscripten_sleep`). `make web-serve` serves it on
   :8000. Deployed at **helldrop.ximg.app** (artifacts copied into ximg-web's
   `helldrop-html/game/`).
+- **On every new release, rebuild the web build and refresh it on the site** —
+  `make web` then copy `dist-web/index.{html,js,wasm,data}` into ximg-web's
+  `helldrop-html/game/`, commit, and deploy. The live wasm does NOT update on
+  its own; releasing without this leaves helldrop.ximg.app on the old build.
+  Full procedure: ximg-web's `CLAUDE.md` → *WebAssembly Apps → Helldrop*.
 - Builds `Helldrop.app` (minimal bundle: Info.plist + icon.icns from
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —
