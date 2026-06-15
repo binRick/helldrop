@@ -1,4 +1,5 @@
 Helldrop.app/
+dist-web/
 vendor/
 logs/
 selftest.png

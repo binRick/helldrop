@@ -43,6 +43,22 @@ static const char *PICKUP_LUMPS[PK_COUNT] = {
     [PK_ROCKET] = "ROCK", [PK_ROCKETBOX] = "BROK",
 };
 
+// Same alpha-test discard shader, two dialects: desktop GL 3.3 core, and
+// GLSL ES 3.00 for WebGL 2 (PLATFORM_WEB) — which additionally requires an
+// explicit float precision qualifier. Bodies are otherwise identical.
+#ifdef PLATFORM_WEB
+static const char *ALPHA_TEST_FS =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "in vec2 fragTexCoord; in vec4 fragColor;\n"
+    "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+    "out vec4 finalColor;\n"
+    "void main() {\n"
+    "    vec4 t = texture(texture0, fragTexCoord);\n"
+    "    if (t.a < 0.5) discard;\n"
+    "    finalColor = t*colDiffuse*fragColor;\n"
+    "}\n";
+#else
 static const char *ALPHA_TEST_FS =
     "#version 330\n"
     "in vec2 fragTexCoord; in vec4 fragColor;\n"
@@ -53,6 +69,7 @@ static const char *ALPHA_TEST_FS =
     "    if (t.a < 0.5) discard;\n"
     "    finalColor = t*colDiffuse*fragColor;\n"
     "}\n";
+#endif
 
 static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex,
                         bool mirror, short botOfs)

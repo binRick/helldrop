@@ -11,6 +11,16 @@ Full design rationale and roadmap: `DESIGN.md`.
   `assets/freedoom1.wad` (BSD-licensed IWAD). No Homebrew deps.
 - raylib is pinned via `RAYLIB_TAG` in the Makefile; upgrade = bump tag +
   `rm -rf vendor/raylib-src`.
+- **Web build** (`make web`, needs Emscripten/`emcc` on PATH): cross-compiles
+  the same portable-C sources to WebAssembly + WebGL2 into `dist-web/`
+  (`index.{html,js,wasm,data}`), preloading `assets/helldrop.wad` and the
+  `web/shell.html` start gate. `make web-raylib` builds `libraylib.web.a`
+  once. On `PLATFORM_WEB` `main()` swaps its blocking loop for
+  `emscripten_set_main_loop` (state hoisted to file scope), forces a single
+  fully-unlocked level (no save/log), and links with `-sASYNCIFY` (raylib's
+  WebAudio init spins on `emscripten_sleep`). `make web-serve` serves it on
+  :8000. Deployed at **helldrop.ximg.app** (artifacts copied into ximg-web's
+  `helldrop-html/game/`).
 - Builds `Helldrop.app` (minimal bundle: Info.plist + icon.icns from
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —
