@@ -1,6 +1,7 @@
 CompileFlags:
   Add:
-    - -Ivendor/raylib-src/src
-    - -Ithird_party/libtess2/Include
-    - -Isrc
+    - -I../vendor/raylib-src/src
+    - -I../third_party/libtess2/Include
+    - -I../src
     - -std=c11
+    - -xc

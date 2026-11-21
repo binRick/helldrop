@@ -14,7 +14,7 @@ TESS_DIR = third_party/libtess2
 TESS_SRC = $(wildcard $(TESS_DIR)/Source/*.c)
 
 SRC  = src/main.c src/wad.c src/map.c src/levelmesh.c src/sim.c src/doomgfx.c \
-       src/sprites.c src/sound.c src/statelog.c $(TESS_SRC)
+       src/sprites.c src/sound.c src/statelog.c src/wadtex.c src/models.c $(TESS_SRC)
 HDRS = $(wildcard src/*.h) $(wildcard $(TESS_DIR)/Source/*.h) $(TESS_DIR)/Include/tesselator.h
 
 CFLAGS  = -O2 -Wall -Wno-unused-result -std=c11 \

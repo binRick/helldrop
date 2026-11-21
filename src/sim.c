@@ -686,7 +686,8 @@ static bool LiftTriggerInRange(const Sim *sim, int li, Vector2 from)
 
 typedef enum ActKind {
     ACT_NONE, ACT_DOOR_OPEN, ACT_DOOR_OWC, ACT_DOOR_CLOSE,
-    ACT_PLAT, ACT_FLOOR_LOWER, ACT_FLOOR_RAISE, ACT_TELEPORT, ACT_EXIT
+    ACT_PLAT, ACT_FLOOR_LOWER, ACT_FLOOR_RAISE, ACT_TELEPORT, ACT_EXIT,
+    ACT_STAIRS, ACT_STAIRS_TURBO
 } ActKind;
 
 typedef struct LineAction {
@@ -720,13 +721,21 @@ static LineAction ActionForSpecial(int sp)
     case 113: return (LineAction){ ACT_DOOR_OPEN,  true,  false, false };
     case 114: return (LineAction){ ACT_DOOR_OWC,   true,  false, true };
     case 115: return (LineAction){ ACT_DOOR_OPEN,  true,  false, true };
+    case 133: case 135: case 137:   // keyed blazing doors (keys not modelled)
+              return (LineAction){ ACT_DOOR_OPEN,  true,  false, false };
+    case 46:  return (LineAction){ ACT_DOOR_OPEN,  true,  false, true };   // gunfire: he shoots it
+    case 107: return (LineAction){ ACT_DOOR_CLOSE, true,  false, false };
+    case 75:  return (LineAction){ ACT_DOOR_CLOSE, false, true,  true };
+    case 16:  return (LineAction){ ACT_DOOR_CLOSE, false, true,  false };
     // plats (already lift sectors; these fire them remotely)
     case 10: case 121: return (LineAction){ ACT_PLAT, false, true,  false };
     case 88: case 120: return (LineAction){ ACT_PLAT, false, true,  true };
     case 21: case 122: return (LineAction){ ACT_PLAT, true,  false, false };
+    case 53:           return (LineAction){ ACT_PLAT, false, true,  false };   // perpetual: one trip is enough for him
     case 62: case 123: return (LineAction){ ACT_PLAT, true,  false, true };
     // one-shot floor lowers (barriers)
-    case 23: case 36: return (LineAction){ ACT_FLOOR_LOWER, true,  false, false };
+    case 23: case 36: case 71: case 102:
+                      return (LineAction){ ACT_FLOOR_LOWER, true,  false, false };
     case 38: case 19: return (LineAction){ ACT_FLOOR_LOWER, false, true,  false };
     case 60: case 70: return (LineAction){ ACT_FLOOR_LOWER, true,  false, true };
     case 82: case 83: case 98: return (LineAction){ ACT_FLOOR_LOWER, false, true, true };
@@ -734,7 +743,13 @@ static LineAction ActionForSpecial(int sp)
     case 18: case 20: case 64: case 101:
         return (LineAction){ ACT_FLOOR_RAISE, true,  false, false };
     case 69: case 91: return (LineAction){ ACT_FLOOR_RAISE, true,  false, true };
-    case 5: case 119: return (LineAction){ ACT_FLOOR_RAISE, false, true,  false };
+    case 5: case 119: case 22: case 58: case 30: case 59:
+                      return (LineAction){ ACT_FLOOR_RAISE, false, true,  false };
+    // stair builders: each step rises 8 (16 turbo) above the previous
+    case 7:   return (LineAction){ ACT_STAIRS,       true,  false, false };
+    case 8:   return (LineAction){ ACT_STAIRS,       false, true,  false };
+    case 100: return (LineAction){ ACT_STAIRS_TURBO, false, true,  false };
+    case 127: return (LineAction){ ACT_STAIRS_TURBO, true,  false, false };
     case 128:         return (LineAction){ ACT_FLOOR_RAISE, false, true,  true };
     // teleports
     case 39: return (LineAction){ ACT_TELEPORT, false, true, false };
@@ -752,6 +767,46 @@ static bool SegsCross(Vector2 a, Vector2 b, Vector2 c, Vector2 d);
 // Sectors targeted by tagged door/floor actions get Door/Lift state
 // machines too, so nav potentials and live blocking treat them like their
 // manually-operated cousins.
+// Stair builders (vanilla EV_BuildStairs): from each tagged sector, walk
+// through two-sided lines whose FRONT side is the current step into a
+// neighbor with the same floor flat; every step rises `step` above the last.
+// Each step becomes a one-shot riser lift sharing the tag.
+static void BuildStairs(Sim *sim, int tag, float step)
+{
+    const DoomMap *map = sim->map;
+    for (int s = 0; s < map->sectorCount; s++) {
+        if (map->sectors[s].tag != tag || sim->sectorLift[s] >= 0) continue;
+        int cur = s;
+        float h = map->sectors[s].floorH + step;
+        for (int guard = 0; guard < 64 && cur >= 0; guard++) {
+            if (sim->liftCount >= map->sectorCount) return;
+            Lift *lf = &sim->lifts[sim->liftCount];
+            memset(lf, 0, sizeof(*lf));
+            lf->sector = cur;
+            lf->floor = lf->prevFloor = lf->lowFloor = map->sectors[cur].floorH;
+            lf->highFloor = h;
+            lf->speed = (step > 8.0f) ? 4.0f : 1.0f;
+            lf->state = LIFT_LOW;
+            lf->stayLow = true;
+            lf->riser = true;
+            lf->stairTag = tag;
+            sim->sectorLift[cur] = sim->liftCount++;
+            int next = -1;
+            for (int j = 0; j < map->lineCount && next < 0; j++) {
+                const Linedef *n = &map->lines[j];
+                if (n->sideFront < 0 || n->sideBack < 0) continue;
+                if (map->sides[n->sideFront].sector != cur) continue;
+                int b = map->sides[n->sideBack].sector;
+                if (b == cur || sim->sectorLift[b] >= 0) continue;
+                if (strncmp(map->sectors[b].floorFlat, map->sectors[s].floorFlat, 8) != 0) continue;
+                next = b;
+            }
+            cur = next;
+            h += step;
+        }
+    }
+}
+
 static void BuildTaggedActions(Sim *sim)
 {
     const DoomMap *map = sim->map;
@@ -763,6 +818,10 @@ static void BuildTaggedActions(Sim *sim)
                        act.kind == ACT_DOOR_CLOSE);
         bool isFloor = (act.kind == ACT_FLOOR_LOWER);
         bool isRaise = (act.kind == ACT_FLOOR_RAISE);
+        if (act.kind == ACT_STAIRS || act.kind == ACT_STAIRS_TURBO) {
+            BuildStairs(sim, l->tag, (act.kind == ACT_STAIRS_TURBO) ? 16.0f : 8.0f);
+            continue;
+        }
         if (!isDoor && !isFloor && !isRaise) continue;
         for (int s = 0; s < map->sectorCount; s++) {
             if (map->sectors[s].tag != l->tag) continue;
@@ -884,6 +943,11 @@ static void RunLineAction(Sim *sim, int lineIdx)
             act.kind == ACT_FLOOR_RAISE) {
             int li = sim->sectorLift[s];
             if (li >= 0) LiftActivate(sim, li);
+        } else if (act.kind == ACT_STAIRS || act.kind == ACT_STAIRS_TURBO) {
+            for (int k = 0; k < sim->liftCount; k++)
+                if (sim->lifts[k].stairTag == l->tag && sim->lifts[k].state == LIFT_LOW)
+                    LiftActivate(sim, k);
+            break;   // the whole chain fired; one pass is enough
         } else {
             int di = sim->sectorDoor[s];
             if (di < 0) continue;
@@ -2676,6 +2740,33 @@ static bool PlanSwitchHunt(Sim *sim, const char *reason)
         StateLogInt("reachable_tris", reach);
         StateLogInt("tris", sim->triCount);
         StateLogInt("start_tri", TriAtPoint(sim, dg->pos.x, dg->pos.y));
+        // Which lines fence the reachable region in? (progression debugging)
+        unsigned char *inR = (unsigned char *)calloc((size_t)sim->map->sectorCount, 1);
+        if (inR) {
+            for (int t = 0; t < sim->triCount; t++)
+                if (g[t] != FLT_MAX) inR[sim->lm->floorTriSector[t]] = 1;
+            StateLogArrBegin("fence");
+            int shown = 0;
+            for (int li = 0; li < sim->map->lineCount && shown < 40; li++) {
+                const Linedef *l = &sim->map->lines[li];
+                if (l->sideFront < 0 || l->sideBack < 0) continue;
+                int fs = sim->map->sides[l->sideFront].sector, bs = sim->map->sides[l->sideBack].sector;
+                if (inR[fs] == inR[bs]) continue;
+                shown++;
+                StateLogObjBegin(NULL);
+                StateLogInt("line", li); StateLogInt("special", l->special); StateLogInt("tag", l->tag);
+                StateLogInt("flags", l->flags);
+                int in = inR[fs] ? fs : bs, out = inR[fs] ? bs : fs;
+                StateLogInt("in_sec", in); StateLogInt("out_sec", out);
+                StateLogFloat("in_floor", sim->map->sectors[in].floorH); StateLogFloat("out_floor", sim->map->sectors[out].floorH);
+                StateLogFloat("out_ceil", sim->map->sectors[out].ceilH);
+                StateLogInt("out_door", sim->sectorDoor[out]); StateLogInt("out_lift", sim->sectorLift[out]);
+                StateLogInt("out_special", sim->map->sectors[out].special); StateLogInt("out_tag", sim->map->sectors[out].tag);
+                StateLogObjEnd();
+            }
+            StateLogArrEnd();
+            free(inR);
+        }
         StateLogEnd();
     }
     free(g);
@@ -3871,6 +3962,28 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
         StateLogInt("mobs", sim->mobCount);
         StateLogInt("pickups", sim->pickupCount);
         StateLogInt("barrels", sim->barrelCount);
+        {
+            // Line specials the trigger system doesn't model yet: the first
+            // place to look when a map's progression dead-ends.
+            int seen[512] = { 0 };
+            StateLogArrBegin("unhandled_specials");
+            for (int li = 0; li < map->lineCount; li++) {
+                int sp = map->lines[li].special;
+                if (sp <= 0 || sp >= 512 || seen[sp]) continue;
+                if (ActionForSpecial(sp).kind != ACT_NONE) continue;
+                if (sp == 1 || sp == 26 || sp == 27 || sp == 28 || sp == 31 || sp == 32 ||
+                    sp == 33 || sp == 34 || sp == 117 || sp == 118 || sp == 48 ||
+                    sp == 125 || sp == 126 || sp == 138 || sp == 139 || sp == 35 ||
+                    sp == 12 || sp == 13 || sp == 17 || sp == 104) continue;   // local doors, scrollers, monster teleports, lights
+                seen[sp] = 1;
+                StateLogObjBegin(NULL);
+                StateLogInt("special", sp);
+                StateLogInt("example_line", li);
+                StateLogInt("tag", map->lines[li].tag);
+                StateLogObjEnd();
+            }
+            StateLogArrEnd();
+        }
         StateLogEnd();
     }
     return true;

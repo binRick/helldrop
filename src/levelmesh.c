@@ -1,11 +1,14 @@
 #include "levelmesh.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "raymath.h"
+#include "rlgl.h"
 #include "tesselator.h"
+#include "wadtex.h"
 
 // Sector light scales base colors but never below this, so nothing is
 // pitch black under backface-culled flat shading.
@@ -102,6 +105,93 @@ static void GeoToMesh(GeoBuf *g, Mesh *m)
     m->triangleCount = g->count / 3;
 }
 
+// ---- Textured render geometry (grouped per WAD texture/flat) ----------
+typedef struct TGeo {
+    float *pos, *uv;
+    unsigned char *col;
+    int count, cap;
+} TGeo;
+
+typedef struct TexBuild {
+    LevelTexSlot *slots;
+    TGeo *geo;
+    int n, cap;
+} TexBuild;
+
+static TexBuild *g_tb;   // non-NULL while building textured geometry
+static const WadTex *g_wt;
+
+static int TexSlot(const char *name, bool flat)
+{
+    TexBuild *tb = g_tb;
+    if (!tb) return -1;
+    char nm[9] = { 0 };
+    for (int i = 0; i < 8 && name[i]; i++) nm[i] = (name[i] >= 'a' && name[i] <= 'z') ? (char)(name[i] - 32) : name[i];
+    for (int i = 0; i < tb->n; i++) {
+        if (tb->slots[i].flat == flat && strncmp(tb->slots[i].name, nm, 8) == 0) return i;
+    }
+    if (tb->n == tb->cap) {
+        int cap = tb->cap ? tb->cap*2 : 64;
+        LevelTexSlot *s = (LevelTexSlot *)realloc(tb->slots, (size_t)cap*sizeof(LevelTexSlot));
+        if (!s) return -1;
+        tb->slots = s;
+        TGeo *g = (TGeo *)realloc(tb->geo, (size_t)cap*sizeof(TGeo));
+        if (!g) return -1;
+        tb->geo = g;
+        tb->cap = cap;
+    }
+    memset(&tb->slots[tb->n], 0, sizeof(LevelTexSlot));
+    memset(&tb->geo[tb->n], 0, sizeof(TGeo));
+    memcpy(tb->slots[tb->n].name, nm, 9);
+    tb->slots[tb->n].flat = flat;
+    tb->slots[tb->n].w = 64;
+    tb->slots[tb->n].h = flat ? 64 : 128;
+    if (!flat && g_wt) {
+        int d = WadTexFind(g_wt, nm);
+        tb->slots[tb->n].def = d;
+        if (d >= 0) { tb->slots[tb->n].w = g_wt->defs[d].width; tb->slots[tb->n].h = g_wt->defs[d].height; }
+    }
+    return tb->n++;
+}
+
+static bool TGeoPush(TGeo *g, const Vector3 p[3], const Vector2 t[3], const Color c[3])
+{
+    if (g->count + 3 > g->cap) {
+        int cap = g->cap ? g->cap*2 : 384;
+        while (cap < g->count + 3) cap *= 2;
+        float *np = (float *)realloc(g->pos, (size_t)cap*3*sizeof(float));
+        if (!np) return false;
+        g->pos = np;
+        float *nu = (float *)realloc(g->uv, (size_t)cap*2*sizeof(float));
+        if (!nu) return false;
+        g->uv = nu;
+        unsigned char *nc = (unsigned char *)realloc(g->col, (size_t)cap*4);
+        if (!nc) return false;
+        g->col = nc;
+        g->cap = cap;
+    }
+    for (int i = 0; i < 3; i++) {
+        int k = g->count + i;
+        g->pos[k*3] = p[i].x; g->pos[k*3 + 1] = p[i].y; g->pos[k*3 + 2] = p[i].z;
+        g->uv[k*2] = t[i].x; g->uv[k*2 + 1] = t[i].y;
+        g->col[k*4] = c[i].r; g->col[k*4 + 1] = c[i].g; g->col[k*4 + 2] = c[i].b; g->col[k*4 + 3] = 255;
+    }
+    g->count += 3;
+    return true;
+}
+
+// Light as a vertex tint over the texture. Brighter than the flat-shaded
+// path (textures carry their own darkness) but sector light still reads:
+// dark sectors are ambush terrain and must look it.
+static Color TexLight(int light, float extra)
+{
+    float m = LightMul(light)*1.18f*extra;
+    if (m > 1.0f) m = 1.0f;
+    if (m < 0.10f) m = 0.10f;
+    unsigned char v = (unsigned char)(m*255.0f);
+    return (Color){ v, v, v, 255 };
+}
+
 static int SectorOfSide(const DoomMap *map, int side)
 {
     return (side >= 0) ? map->sides[side].sector : -1;
@@ -130,6 +220,9 @@ typedef struct BEdge {
     bool used;
 } BEdge;
 
+static int g_floorSlot = -1;
+static Color g_floorCol;
+
 static bool EmitSectorFloor(GeoBuf *g, IntBuf *tri2sec, int sectorIdx,
                             TESStesselator *tess, float floorH, Color col)
 {
@@ -152,6 +245,12 @@ static bool EmitSectorFloor(GeoBuf *g, IntBuf *tri2sec, int sectorIdx,
         if (!GeoPushTri(g, (Vector3){ x0, floorH, -y0 },
                            (Vector3){ x1, floorH, -y1 },
                            (Vector3){ x2, floorH, -y2 }, col)) return false;
+        if (g_tb && g_floorSlot >= 0) {
+            const Vector3 p[3] = { { x0, floorH, -y0 }, { x1, floorH, -y1 }, { x2, floorH, -y2 } };
+            const Vector2 t[3] = { { x0/64.0f, -y0/64.0f }, { x1/64.0f, -y1/64.0f }, { x2/64.0f, -y2/64.0f } };
+            const Color c[3] = { g_floorCol, g_floorCol, g_floorCol };
+            if (!TGeoPush(&g_tb->geo[g_floorSlot], p, t, c)) return false;
+        }
     }
     return true;
 }
@@ -290,6 +389,10 @@ static bool BuildFloors(GeoBuf *g, IntBuf *tri2sec, const DoomMap *map)
                      s, dangling);
         }
         if (ok && contours > 0) {
+            if (g_tb) {
+                g_floorSlot = TexSlot(sec->floorFlat, true);
+                g_floorCol = TexLight(sec->light, 1.0f);
+            }
             if (tessTesselate(tess, TESS_WINDING_POSITIVE, TESS_POLYGONS, 3, 2, NULL)) {
                 ok = EmitSectorFloor(g, tri2sec, s, tess,
                                      FloorRenderHeight(map, s), col);
@@ -341,6 +444,55 @@ static bool BuildWalls(GeoBuf *g, const DoomMap *map)
         if (a.x == b.x) light += 16;        // Doom fake contrast
         else if (a.y == b.y) light -= 16;
         Color col = Shade(wallBase, LightMul(light));
+        if (g_tb) {
+            // Which sidedef's texture faces the camera-visible step/wall,
+            // and Doom's vertical alignment (pegging) for it.
+            int sideIdx = l->sideFront;
+            bool flip = false;
+            const char *texName = NULL;
+            float vTop = hi;
+            if (fs >= 0 && bs >= 0) {
+                bool frontLow = map->sectors[fs].floorH < map->sectors[bs].floorH;
+                sideIdx = frontLow ? l->sideFront : l->sideBack;
+                flip = !frontLow;
+                const Sidedef *sd = &map->sides[sideIdx];
+                texName = sd->lower;
+                int own = frontLow ? fs : bs;
+                if (l->flags & 0x10) vTop = map->sectors[own].ceilH;   // lower unpegged
+            } else {
+                if (sideIdx < 0) { sideIdx = l->sideBack; flip = true; }
+                const Sidedef *sd = &map->sides[sideIdx];
+                texName = sd->middle;
+                if (texName[0] == '-' || !texName[0]) texName = sd->lower[0] != '-' ? sd->lower : sd->upper;
+            }
+            const Sidedef *sd = &map->sides[sideIdx];
+            int slot = TexSlot((texName && texName[0] && texName[0] != '-') ? texName : "-", false);
+            if (slot >= 0) {
+                LevelTexSlot *ts = &g_tb->slots[slot];
+                float tw = ts->w > 0 ? (float)ts->w : 64.0f, th = ts->h > 0 ? (float)ts->h : 128.0f;
+                if (!(fs >= 0 && bs >= 0) && (l->flags & 0x10)) vTop = lo + th;   // middle, lower unpegged
+                float len = Vector2Distance(a, b);
+                float u0 = sd->xoff/tw, u1 = (sd->xoff + len)/tw;
+                if (flip) { float t = u0; u0 = u1; u1 = t; }
+                float vLo = (vTop - lo + sd->yoff)/th, vHi = (vTop - hi + sd->yoff)/th;
+                float tall = hi - lo;
+                // Soft contact shadow: wall bases darker than their tops.
+                float baseMul = (tall >= 40.0f) ? 0.58f : 0.80f;
+                Color cTop = TexLight(light, 1.0f), cBot = TexLight(light, baseMul);
+                Vector3 A0 = { a.x, lo, -a.y }, B0 = { b.x, lo, -b.y };
+                Vector3 A1 = { a.x, hi, -a.y }, B1 = { b.x, hi, -b.y };
+                Vector2 tA0 = { u0, vLo }, tB0 = { u1, vLo }, tA1 = { u0, vHi }, tB1 = { u1, vHi };
+                TGeo *tg = &g_tb->geo[slot];
+                const Vector3 q1[3] = { A0, B0, B1 }, q2[3] = { A0, B1, A1 };
+                const Vector3 q3[3] = { A0, B1, B0 }, q4[3] = { A0, A1, B1 };
+                const Vector2 t1[3] = { tA0, tB0, tB1 }, t2[3] = { tA0, tB1, tA1 };
+                const Vector2 t3[3] = { tA0, tB1, tB0 }, t4[3] = { tA0, tA1, tB1 };
+                const Color c1[3] = { cBot, cBot, cTop }, c2[3] = { cBot, cTop, cTop };
+                const Color c3[3] = { cBot, cTop, cBot }, c4[3] = { cBot, cTop, cTop };
+                if (!TGeoPush(tg, q1, t1, c1) || !TGeoPush(tg, q2, t2, c2) ||
+                    !TGeoPush(tg, q3, t3, c3) || !TGeoPush(tg, q4, t4, c4)) return false;
+            }
+        }
         Vector3 a0 = { a.x, lo, -a.y }, b0 = { b.x, lo, -b.y };
         Vector3 a1 = { a.x, hi, -a.y }, b1 = { b.x, hi, -b.y };
         // Both windings so walls render from either side with culling on.
@@ -389,13 +541,111 @@ bool LevelMeshGenerate(LevelMesh *lm, const DoomMap *map)
     return true;
 }
 
-bool LevelMeshBuild(LevelMesh *lm, const DoomMap *map)
+// Animated flats cycle like vanilla (every 8 tics): NUKAGE1..3 etc.
+static int FlatAnimFrames(const char *name, char frames[4][9])
 {
-    if (!LevelMeshGenerate(lm, map)) return false;
+    static const struct { const char *base; int n; } SEQ[] = {
+        { "NUKAGE", 3 }, { "FWATER", 4 }, { "LAVA", 4 }, { "BLOOD", 3 },
+        { "SWATER", 4 }, { "SLIME0", 3 },
+    };
+    for (size_t s = 0; s < sizeof(SEQ)/sizeof(SEQ[0]); s++) {
+        size_t bl = strlen(SEQ[s].base);
+        if (strncmp(name, SEQ[s].base, bl) != 0) continue;
+        if (name[bl] < '1' || name[bl] > '9') continue;
+        for (int i = 0; i < SEQ[s].n; i++) snprintf(frames[i], 9, "%s%d", SEQ[s].base, i + 1);
+        return SEQ[s].n;
+    }
+    return 0;
+}
+
+static Texture2D UploadLevelTexture(Image img)
+{
+    Texture2D t = LoadTextureFromImage(img);
+    if (t.id == 0) return t;
+    GenTextureMipmaps(&t);
+    // Crisp texels up close (it's Doom), no shimmer when zoomed out.
+    SetTextureFilter(t, TEXTURE_FILTER_TRILINEAR);
+    rlTextureParameters(t.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+    rlTextureParameters(t.id, RL_TEXTURE_FILTER_ANISOTROPIC, 8);
+    return t;
+}
+
+static bool LoadSlotTexture(const WadTex *wt, LevelTexSlot *s)
+{
+    Image img = { 0 };
+    bool ok = false;
+    if (s->flat) {
+        char frames[4][9];
+        int n = FlatAnimFrames(s->name, frames);
+        if (n > 0) {
+            for (int i = 0; i < n; i++) {
+                Image fi;
+                if (!WadFlatImage(wt, frames[i], &fi)) { n = i; break; }
+                s->tex[i] = UploadLevelTexture(fi);
+                UnloadImage(fi);
+            }
+            s->frames = n;
+            if (n > 0) return true;
+        }
+        ok = WadFlatImage(wt, s->name, &img);
+    } else if (s->def >= 0) {
+        ok = WadTexImage(wt, s->def, &img);
+    }
+    if (!ok) {
+        // Missing art: a neutral stone tone keeps the geometry readable.
+        img = GenImageColor(8, 8, s->flat ? (Color){ 120, 114, 104, 255 } : (Color){ 96, 100, 110, 255 });
+    }
+    s->tex[0] = UploadLevelTexture(img);
+    s->frames = 1;
+    UnloadImage(img);
+    return s->tex[0].id != 0;
+}
+
+bool LevelMeshBuild(LevelMesh *lm, const DoomMap *map, const Wad *wad)
+{
+    WadTex wt;
+    bool textured = wad && WadTexOpen(&wt, wad);
+    TexBuild tb = { 0 };
+    if (textured) { g_tb = &tb; g_wt = &wt; }
+    bool ok = LevelMeshGenerate(lm, map);
+    g_tb = NULL; g_wt = NULL;
+    if (!ok) {
+        for (int i = 0; i < tb.n; i++) { free(tb.geo[i].pos); free(tb.geo[i].uv); free(tb.geo[i].col); }
+        free(tb.geo); free(tb.slots);
+        if (textured) WadTexClose(&wt);
+        return false;
+    }
     if (lm->floors.vertexCount > 0) UploadMesh(&lm->floors, false);
     if (lm->walls.vertexCount > 0) UploadMesh(&lm->walls, false);
     lm->mat = LoadMaterialDefault();
     lm->valid = true;
+
+    if (textured && tb.n > 0) {
+        lm->slots = tb.slots;
+        lm->slotCount = tb.n;
+        lm->slotMesh = (Mesh *)calloc((size_t)tb.n, sizeof(Mesh));
+        lm->slotMat = (Material *)calloc((size_t)tb.n, sizeof(Material));
+        int tris = 0;
+        for (int i = 0; i < tb.n && lm->slotMesh && lm->slotMat; i++) {
+            TGeo *g = &tb.geo[i];
+            LoadSlotTexture(&wt, &lm->slots[i]);
+            lm->slotMat[i] = LoadMaterialDefault();
+            lm->slotMat[i].maps[MATERIAL_MAP_DIFFUSE].texture = lm->slots[i].tex[0];
+            Mesh *m = &lm->slotMesh[i];
+            m->vertices = g->pos;
+            m->texcoords = g->uv;
+            m->colors = g->col;
+            m->vertexCount = g->count;
+            m->triangleCount = g->count/3;
+            tris += m->triangleCount;
+            if (g->count > 0) UploadMesh(m, false);
+        }
+        free(tb.geo);
+        lm->textured = (lm->slotMesh && lm->slotMat);
+        TraceLog(LOG_INFO, "LEVELMESH: %s: %d texture slots, %d textured tris",
+                 map->name, tb.n, tris);
+    }
+    if (textured) WadTexClose(&wt);
     TraceLog(LOG_INFO, "LEVELMESH: %s: %d floor tris, %d wall tris",
              map->name, lm->floors.triangleCount, lm->walls.triangleCount);
     return true;
@@ -410,6 +660,14 @@ void LevelMeshFree(LevelMesh *lm)
         UnloadMesh(lm->walls);
         UnloadMaterial(lm->mat);
     }
+    for (int i = 0; i < lm->slotCount; i++) {
+        if (lm->slotMesh) UnloadMesh(lm->slotMesh[i]);
+        for (int f = 0; f < lm->slots[i].frames; f++) UnloadTexture(lm->slots[i].tex[f]);
+        if (lm->slotMat) { lm->slotMat[i].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){ 0 }; UnloadMaterial(lm->slotMat[i]); }
+    }
+    free(lm->slotMesh);
+    free(lm->slotMat);
+    free(lm->slots);
     memset(lm, 0, sizeof(*lm));
 }
 
@@ -417,6 +675,17 @@ void LevelMeshDraw(const LevelMesh *lm)
 {
     if (!lm || !lm->valid) return;
     Matrix id = MatrixIdentity();
+    if (lm->textured) {
+        int animTic = (int)(GetTime()*35.0/8.0);
+        for (int i = 0; i < lm->slotCount; i++) {
+            if (lm->slotMesh[i].vertexCount <= 0) continue;
+            const LevelTexSlot *s = &lm->slots[i];
+            Material m = lm->slotMat[i];
+            if (s->frames > 1) m.maps[MATERIAL_MAP_DIFFUSE].texture = s->tex[animTic % s->frames];
+            DrawMesh(lm->slotMesh[i], m, id);
+        }
+        return;
+    }
     if (lm->floors.vertexCount > 0) DrawMesh(lm->floors, lm->mat, id);
     if (lm->walls.vertexCount > 0) DrawMesh(lm->walls, lm->mat, id);
 }

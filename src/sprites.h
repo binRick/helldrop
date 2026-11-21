@@ -41,6 +41,8 @@ typedef struct GameSprites {
     SpriteSet barrel;           // BAR1: exploding barrels
     SpriteSet fire;             // FIRE: arch-vile flame on his target
     SpriteSet pickups[PK_COUNT];
+    SpriteSet *deco;            // static decorations (heap: ~70 sets)
+    short decoAlias[96];        // DECO index -> set that owns the lumps
     Shader alphaTest;           // discard shader: depth-correct billboards
     bool valid;
 } GameSprites;
@@ -57,6 +59,8 @@ const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long ti
 const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long age);
 const SpriteFrame *FireSpriteFrame(const GameSprites *gs, long tic);
 const SpriteFrame *BarrelSpriteFrame(const GameSprites *gs, long tic);
+// Map decoration / un-simulated item by doomednum; NULL when unknown.
+const SpriteFrame *DecoSpriteFrame(const GameSprites *gs, int ednum, long tic);
 
 // Doom rotation index for an entity facing entAngle (degrees, doom coords)
 // seen by a viewer at viewerDoom. Works for the iso camera (pass its

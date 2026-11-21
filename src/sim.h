@@ -64,6 +64,7 @@ typedef struct Lift {
     bool stayLow;             // one-shot floor-lower barriers never rise
     bool riser;               // floor-raise targets: start low, rise once
     bool recalled;            // Hell's Hand: extra hold at the bottom
+    int stairTag;             // stair-builder chain (0 = not a stair step)
 } Lift;
 
 // Exploding barrels (thing 2035): shootable, chain-reacting, and remotely

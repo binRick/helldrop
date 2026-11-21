@@ -18,6 +18,7 @@
 #include "sprites.h"
 #include "sound.h"
 #include "statelog.h"
+#include "models.h"
 #define KIT_BACKGROUND_IMPLEMENTATION
 #include "kit_background.h"
 
@@ -52,6 +53,11 @@ typedef struct Options {
     int garrisonDmg;       // --garrison-dmg <pct>: native monster damage (balance)
 } Options;
 
+static GameModels gmodels;     // Blender-built 3D models (M toggles sprites)
+static float SectorLight01(const Sim *sim, int sector);
+static bool debugHud;          // F1: the developer overlay
+static int howtoFrames;         // start-of-match "how to play" card
+
 typedef struct ViewState {
     Vector3 target;
     float yawDeg;
@@ -61,6 +67,7 @@ typedef struct ViewState {
     Vector3 homeTarget;
     float homeFovy;
     bool atZoomMin, atZoomMax;
+    bool follow;           // camera tracks the marine (SPACE); any pan releases it
 } ViewState;
 
 // ---------------------------------------------------------------- args
@@ -281,25 +288,29 @@ static float *ComputeThingHeights(const DoomMap *map, const Mesh *floors)
     return heights;
 }
 
-static void DrawThings(const DoomMap *map, const float *heights)
+// Decorations and keys: WAD sprites standing on the floor (they used to be
+// grey placeholder cylinders). Live sim entities (monsters, simulated
+// pickups, barrels) are drawn by their own passes.
+static void DrawThings(const DoomMap *map, const float *heights,
+                       const GameSprites *gs, Camera3D cam, long tic)
 {
-    if (!heights) return;
+    if (!heights || !gs->valid) return;
+    static const int SIM_PICKUPS[] = { 2011, 2012, 2018, 2001, 2007, 2048, 2008,
+                                       2049, 2002, 2003, 2010, 2046, 2035 };
+    unsigned skillBit = SimGetTuning().garrisonSkillBit;
     for (int i = 0; i < map->thingCount; i++) {
         const Thing *t = &map->things[i];
+        if (t->flags & 0x10) continue;                 // multiplayer only
+        if (!(t->flags & skillBit) && (t->flags & 0x07)) continue;
         ThingCat cat = ThingCategory(t->type);
-        // Players, monsters, and supported pickups are live sim entities now;
-        // only keys and unclassified decoration remain static markers.
-        if (cat == CAT_PLAYER || cat == CAT_MONSTER || cat == CAT_BOSS ||
-            cat == CAT_WEAPON || cat == CAT_HEALTH) continue;
-        float scale = (cat == CAT_BOSS) ? 1.5f : 1.0f;
-        float radius = 14.0f * scale;
-        float height = 28.0f * scale;
-        Vector3 base = { t->x, heights[i], -t->y };
-        Color c = ThingColor(cat);
-        Color outline = { (unsigned char)(c.r/2), (unsigned char)(c.g/2),
-                          (unsigned char)(c.b/2), 255 };
-        DrawCylinder(base, radius, radius, height, 10, c);
-        DrawCylinderWires(base, radius, radius, height, 10, outline);
+        if (cat == CAT_PLAYER || cat == CAT_MONSTER || cat == CAT_BOSS) continue;
+        bool live = false;
+        for (size_t k = 0; k < sizeof(SIM_PICKUPS)/sizeof(SIM_PICKUPS[0]); k++)
+            if (SIM_PICKUPS[k] == t->type) { live = true; break; }
+        if (live) continue;
+        const SpriteFrame *f = DecoSpriteFrame(gs, t->type, tic + i*7);
+        if (!f) continue;
+        DrawSpriteBillboard(cam, f, 0, (Vector3){ t->x, heights[i], -t->y }, WHITE);
     }
 }
 
@@ -320,6 +331,13 @@ static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
                         Camera3D cam)
 {
     Vector3 p = DgRenderPos(sim, alpha);
+    if (gmodels.enabled && gmodels.marine.loaded) {
+        ModelClip clip; float ct; bool loop;
+        DgModelPose(&sim->dg, sim->tic, alpha, &clip, &ct, &loop);
+        GameModelDraw(&gmodels, &gmodels.marine, p, sim->dg.angleDeg, clip, ct, loop,
+                      WHITE, SectorLight01(sim, sim->dg.sector));
+        return;
+    }
     const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, &sim->dg, sim->tic) : NULL;
     if (f) {
         int rot = SpriteRotationFrom(sim->dg.angleDeg,
@@ -381,6 +399,17 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_PAINELEMENTAL] = { 160,  90, 110, 255 },
 };
 
+static const SpriteFrame *f0(const GameSprites *gs, const Mob *m, long tic)
+{
+    return gs->valid ? MobSpriteFrame(gs, m, tic) : NULL;
+}
+
+static float SectorLight01(const Sim *sim, int sector)
+{
+    if (sector < 0 || sector >= sim->map->sectorCount) return 0.8f;
+    return (float)sim->map->sectors[sector].light/255.0f;
+}
+
 static Vector3 MobRenderPos(const Mob *m, float alpha)
 {
     float x = m->prevPos.x + (m->pos.x - m->prevPos.x)*alpha;
@@ -406,8 +435,17 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
                              12, (Color){ 88, 14, 14, 255 });
             }
         }
-        const SpriteFrame *f = gs->valid ? MobSpriteFrame(gs, m, sim->tic) : NULL;
-        if (f) {
+        const GameModel *gmdl = gmodels.enabled ? &gmodels.mob[m->kind] : NULL;
+        if (gmdl && gmdl->loaded) {
+            ModelClip clip; float ct; bool loop;
+            MobModelPose(m, i, sim->tic, alpha, &clip, &ct, &loop);
+            Color tint = WHITE;
+            if (m->kind == MK_SPECTRE) tint = (Color){ 40, 40, 58, 255 };
+            if (m->state == MOB_PAIN && ((sim->tic/2) & 1)) tint = (Color){ 255, 200, 200, 255 };
+            GameModelDraw(&gmodels, gmdl, p, m->angleDeg, clip, ct, loop, tint,
+                          SectorLight01(sim, m->sector));
+        } else if (f0(gs, m, sim->tic)) {
+            const SpriteFrame *f = f0(gs, m, sim->tic);
             // Spectres render as a dark ghost of the pinky sprite.
             Color tint = (m->kind == MK_SPECTRE) ? (Color){ 38, 38, 50, 255 }
                                                  : WHITE;
@@ -508,7 +546,10 @@ static void DrawBarrels(const Sim *sim, const GameSprites *gs, Camera3D cam)
         if (!b->alive) continue;
         const SpriteFrame *f = gs->valid ? BarrelSpriteFrame(gs, sim->tic) : NULL;
         Vector3 base = { b->pos.x, b->z, -b->pos.y };
-        if (f) {
+        if (gmodels.enabled && gmodels.barrel.loaded) {
+            GameModelDraw(&gmodels, &gmodels.barrel, base, (float)(i*47 % 360), CLIP_IDLE, 0, true,
+                          WHITE, 0.8f);
+        } else if (f) {
             DrawSpriteBillboard(cam, f, 0, base, WHITE);
         } else {
             DrawCylinder(base, 11.0f, 9.0f, 34.0f, 10, (Color){ 90, 140, 90, 255 });
@@ -523,6 +564,14 @@ static void DrawPickups(const Sim *sim, const GameSprites *gs, Camera3D cam)
         if (!p->alive) continue;
         const SpriteFrame *f = gs->valid ? PickupSpriteFrame(gs, p->type, sim->tic)
                                          : NULL;
+        if (gmodels.enabled && gmodels.pickup[p->type].loaded) {
+            // Items idle-spin and bob so they read as "take me".
+            float tt = (float)sim->tic/35.0f + (float)i*0.7f;
+            Vector3 at = { p->pos.x, p->z + 3.0f + sinf(tt*2.5f)*2.0f, -p->pos.y };
+            GameModelDraw(&gmodels, &gmodels.pickup[p->type], at, tt*70.0f, CLIP_IDLE, 0, true,
+                          WHITE, 0.9f);
+            continue;
+        }
         if (f) {
             DrawSpriteBillboard(cam, f, 0, (Vector3){ p->pos.x, p->z, -p->pos.y },
                                 WHITE);
@@ -681,6 +730,7 @@ static void LogSnapshot(const ViewState *vs, const Sim *sim)
     StateLogFloat("yaw", vs->yawDeg);
     StateLogFloat("pitch", vs->pitchDeg);
     StateLogFloat("fovy", vs->fovy);
+    StateLogBool("follow", vs->follow);
     StateLogObjEnd();
     StateLogObjBegin("doomguy");
     StateLogFloat("x", sim->dg.pos.x);
@@ -757,6 +807,7 @@ static void LogSnapshot(const ViewState *vs, const Sim *sim)
         StateLogInt("sector", sim->lifts[i].sector);
         StateLogStr("state", LIFT_STATES[sim->lifts[i].state]);
         StateLogFloat("floor", sim->lifts[i].floor);
+        if (sim->lifts[i].stairTag) StateLogInt("stair_tag", sim->lifts[i].stairTag);
         StateLogObjEnd();
     }
     StateLogArrEnd();
@@ -775,8 +826,11 @@ static void LogShutdown(long frames, long tics)
 
 // ---------------------------------------------------------------- camera
 
+#define FOLLOW_FOVY 1100.0f   // readable default: the marine ~50px tall
+
 static void ViewReset(ViewState *vs)
 {
+    vs->follow = false;
     vs->target = vs->homeTarget;
     vs->yawDeg = YAW_HOME;
     vs->targetYawDeg = YAW_HOME;
@@ -791,6 +845,11 @@ static void CameraUpdate(ViewState *vs, float dt)
     if (IsKeyPressed(KEY_R)) {
         ViewReset(vs);
         LogInput("reset");
+    }
+    if (IsKeyPressed(KEY_SPACE) && !vs->follow) {
+        vs->follow = true;
+        if (vs->fovy > 2.0f*FOLLOW_FOVY) vs->fovy = FOLLOW_FOVY;
+        LogInput("follow");
     }
     if (IsKeyPressed(KEY_Q)) {
         vs->targetYawDeg += 90.0f;
@@ -830,12 +889,15 @@ static void CameraUpdate(ViewState *vs, float dt)
     if (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT)) pan = Vector3Add(pan, right);
     if (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT))  pan = Vector3Subtract(pan, right);
     if (pan.x != 0.0f || pan.z != 0.0f) {
+        if (vs->follow) LogInput("follow_off");
+        vs->follow = false;
         pan = Vector3Scale(Vector3Normalize(pan), vs->fovy*0.9f*dt);
         vs->target = Vector3Add(vs->target, pan);
     }
 
     if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) {
         Vector2 d = GetMouseDelta();
+        if ((d.x != 0.0f || d.y != 0.0f) && vs->follow) { vs->follow = false; LogInput("follow_off"); }
         float unitsPerPixel = vs->fovy/(float)GetScreenHeight();
         float foreshorten = sinf(vs->pitchDeg*DEG2RAD);   // >= sin(25 deg)
         vs->target = Vector3Add(vs->target, Vector3Scale(right, -d.x*unitsPerPixel));
@@ -882,6 +944,9 @@ static void SetupView(ViewState *vs, const DoomMap *map)
                                 -(map->minY + map->maxY)*0.5f };
     vs->homeFovy = Clamp(fmaxf(extent*0.6f, 500.0f), FOVY_MIN, FOVY_MAX);
     ViewReset(vs);
+    // Start on the marine, close enough to read the fight; R shows the map.
+    vs->follow = true;
+    vs->fovy = FOVY_MIN > FOLLOW_FOVY ? FOVY_MIN : FOLLOW_FOVY;
     float diag = sqrtf(extentX*extentX + extentY*extentY);
     rlSetClipPlanes(1.0, CAM_DIST + 2.0*diag);
 }
@@ -1030,7 +1095,7 @@ static bool ReloadLevel(const Wad *wad, const char *mapName, DoomMap *map,
     LevelMeshFree(lm);
     MapFree(map);
     if (!MapLoadFromWad(map, wad, mapName)) return false;
-    if (!LevelMeshBuild(lm, map)) return false;
+    if (!LevelMeshBuild(lm, map, wad)) return false;
     *thingHeights = ComputeThingHeights(map, &lm->floors);
     if (!SimInit(sim, map, lm)) return false;
     if (StateLogEnabled()) {
@@ -1052,8 +1117,8 @@ static void DrawWorld(const Sim *sim, const LevelMesh *lm, const DoomMap *map,
     LevelMeshDraw(lm);
     DrawLifts(sim, lm, alpha);
     DrawDoors(sim, alpha);
-    DrawThings(map, thingHeights);
     if (gs->valid) BeginShaderMode(gs->alphaTest);
+    DrawThings(map, thingHeights, gs, cam, sim->tic);
     DrawBarrels(sim, gs, cam);
     DrawPickups(sim, gs, cam);
     DrawMobs(sim, alpha, gs, cam);
@@ -1265,6 +1330,12 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
                          16, (Color){ 255, 120, 90, 255 });
     }
     y += 30;
+    if (!debugHud) {
+        DrawTextShadowed("LMB drop demon   1-9,0 pick   F slam door/lift   V barrel   "
+                         "TAB his tells   SPACE follow   R map   F1 debug",
+                         12, y, 14, (Color){ 150, 150, 150, 220 });
+        goto end_hud;
+    }
     DrawTextShadowed(wadBase, 12, y, 16, LIGHTGRAY);
     y += 20;
     DrawTextShadowed(TextFormat("sectors %d  lines %d  things %d",
@@ -1301,6 +1372,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
                                 VERB_DOOR_COST, VERB_LIFT_COST, VERB_BARREL_COST),
                      12, y, 14, (Color){ 230, 140, 90, 255 });
 
+end_hud:
     if (sim->dg.state == DG_EXITED || sim->dg.state == DG_DEAD) {
         DrawIntermission(map, sim, winHint);
     } else if (sim->dg.state == DG_NO_GOAL) {
@@ -1314,7 +1386,10 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
 // Top-right: the soul economy at a glance — balance, drip rate, the priced
 // bestiary with the selected monster highlighted, unaffordables dimmed,
 // and campaign-locked entries showing their unlock level.
-static void DrawSoulsPanel(const Sim *sim, MobKind selected, unsigned unlocked)
+// The summoning column: each demon's own WAD sprite as its portrait, the
+// hotkey, and the price. Dim = can't afford, dark = not unlocked yet.
+static void DrawSoulsPanel(const Sim *sim, MobKind selected, unsigned unlocked,
+                           const GameSprites *gs)
 {
     int sw = GetScreenWidth();
     int y = 12;
@@ -1322,42 +1397,111 @@ static void DrawSoulsPanel(const Sim *sim, MobKind selected, unsigned unlocked)
     int w = MeasureText(souls, 30);
     DrawTextShadowed(souls, sw - w - 16, y, 30, (Color){ 255, 170, 70, 255 });
     y += 34;
-    const char *rate = TextFormat("+%.1f/s", SimSoulRate(sim));
-    w = MeasureText(rate, 16);
-    DrawTextShadowed(rate, sw - w - 16, y, 16, (Color){ 200, 140, 70, 255 });
-    y += 28;
+    const char *rate = TextFormat("+%.1f/s  +1 per HP of his blood", SimSoulRate(sim));
+    w = MeasureText(rate, 14);
+    DrawTextShadowed(rate, sw - w - 16, y, 14, (Color){ 200, 140, 70, 255 });
+    y += 22;
+
+    // Hell's Hand cooldowns: ready verbs glow, resting ones count down.
+    static const struct { int verb; const char *key; const char *name; int cost; } VERBS[] = {
+        { VERB_DOOR, "F", "SLAM DOOR", VERB_DOOR_COST },
+        { VERB_LIFT, "F", "RECALL LIFT", VERB_LIFT_COST },
+        { VERB_BARREL, "V", "BLOW BARREL", VERB_BARREL_COST },
+    };
+    for (int v = 0; v < 3; v++) {
+        long left = sim->verbReadyTic[VERBS[v].verb] - sim->tic;
+        bool ready = left <= 0;
+        bool afford = sim->souls >= (float)VERBS[v].cost;
+        const char *t = ready ? TextFormat("[%s] %s %d", VERBS[v].key, VERBS[v].name, VERBS[v].cost)
+                              : TextFormat("[%s] %s %ds", VERBS[v].key, VERBS[v].name, (int)(left/35 + 1));
+        Color c = !ready ? (Color){ 110, 90, 80, 255 }
+                : afford ? (Color){ 255, 150, 90, 255 } : (Color){ 150, 80, 70, 255 };
+        w = MeasureText(t, 14);
+        DrawTextShadowed(t, sw - w - 16, y, 14, c);
+        y += 17;
+    }
+    y += 8;
+
     // Display keys must match the actual bindings, not enum order.
     static const char *KEY_LABELS[MK_COUNT] = {
         [MK_ZOMBIE] = "1", [MK_SHOTGUNGUY] = "2", [MK_IMP] = "3",
         [MK_PINKY] = "4", [MK_SPECTRE] = "0", [MK_CACO] = "5",
         [MK_LOSTSOUL] = "6", [MK_REVENANT] = "7", [MK_BARON] = "8",
-        [MK_ARCHVILE] = "9", [MK_CHAINGUNNER] = "s1", [MK_HELLKNIGHT] = "s2",
-        [MK_MANCUBUS] = "s3", [MK_PAINELEMENTAL] = "s4",
+        [MK_ARCHVILE] = "9", [MK_CHAINGUNNER] = "S1", [MK_HELLKNIGHT] = "S2",
+        [MK_MANCUBUS] = "S3", [MK_PAINELEMENTAL] = "S4",
     };
-    for (int k = 0; k < MK_COUNT; k++) {
-        int cost = SimDropBaseCost((MobKind)k);
+    static const MobKind ORDER[MK_COUNT] = {
+        MK_ZOMBIE, MK_SHOTGUNGUY, MK_IMP, MK_PINKY, MK_CACO, MK_LOSTSOUL,
+        MK_REVENANT, MK_BARON, MK_ARCHVILE, MK_SPECTRE, MK_CHAINGUNNER,
+        MK_HELLKNIGHT, MK_MANCUBUS, MK_PAINELEMENTAL,
+    };
+    const int rowH = 40, colW = 236;
+    int x0 = sw - colW - 12;
+    for (int o = 0; o < MK_COUNT; o++) {
+        MobKind k = ORDER[o];
         bool isUnlocked = (unlocked & (1u << k)) != 0;
-        const char *label = isUnlocked
-            ? TextFormat("[%s] %-13s %3d", KEY_LABELS[k],
-                         MobKindName((MobKind)k), cost)
-            : TextFormat("[%s] %-13s %s", KEY_LABELS[k],
-                         MobKindName((MobKind)k), UnlockMapFor((MobKind)k));
-        Color c = MOB_COLORS[k];
+        if (!isUnlocked && !gs->mobs[k].any && !gmodels.hasPortrait[k]) continue;
+        int cost = SimDropBaseCost(k);
         bool affordable = sim->souls >= (float)cost;
-        if (!isUnlocked) c = (Color){ 95, 85, 85, 255 };
-        else if (!affordable) c = (Color){ 120, 70, 70, 255 };
-        else if ((MobKind)k != selected) {
-            c.r = (unsigned char)(c.r/2 + 50);
-            c.g = (unsigned char)(c.g/2 + 50);
-            c.b = (unsigned char)(c.b/2 + 50);
+        bool sel = (k == selected) && isUnlocked;
+        Color bg = sel ? (Color){ 70, 20, 16, 210 } : (Color){ 10, 8, 8, 150 };
+        DrawRectangle(x0, y, colW, rowH - 4, bg);
+        if (sel) DrawRectangleLines(x0, y, colW, rowH - 4, (Color){ 255, 120, 60, 255 });
+        // Portrait: frame A, facing the viewer, fitted into the row.
+        const SpriteFrame *pf = (gs->mobs[k].any && gs->mobs[k].frames[0].present)
+                                    ? &gs->mobs[k].frames[0] : NULL;
+        Color tint = !isUnlocked ? (Color){ 40, 40, 40, 255 }
+                   : !affordable ? (Color){ 120, 100, 100, 255 } : WHITE;
+        if (k == MK_SPECTRE && isUnlocked) tint.a = 110;
+        if (gmodels.enabled && gmodels.hasPortrait[k]) {
+            Texture2D t = gmodels.portrait[k].texture;
+            DrawTexturePro(t, (Rectangle){ 0, 0, (float)t.width, -(float)t.height },
+                           (Rectangle){ x0 + 2, y - 1, 38, 38 }, (Vector2){ 0, 0 }, 0.0f, tint);
+        } else if (pf) {
+            Texture2D t = pf->tex[0];
+            float s = fminf((rowH - 8)/(float)t.height, 40.0f/(float)t.width);
+            float dw = t.width*s, dh = t.height*s;
+            Rectangle src = { 0, 0, pf->mirror[0] ? -(float)t.width : (float)t.width, (float)t.height };
+            DrawTexturePro(t, src, (Rectangle){ x0 + 4 + (40 - dw)/2, y + (rowH - 4 - dh)/2, dw, dh },
+                           (Vector2){ 0, 0 }, 0.0f, tint);
         }
-        w = MeasureText(label, 18);
-        DrawTextShadowed(label, sw - w - 16, y, 18, c);
-        if ((MobKind)k == selected && isUnlocked) {
-            DrawRectangle(sw - w - 16, y + 20, w, 2, MOB_COLORS[k]);
-        }
-        y += 24;
+        Color nameC = !isUnlocked ? (Color){ 95, 85, 85, 255 }
+                    : !affordable ? (Color){ 140, 95, 90, 255 } : MOB_COLORS[k];
+        DrawTextShadowed(KEY_LABELS[k], x0 + 50, y + 4, 12, (Color){ 200, 200, 200, 255 });
+        DrawTextShadowed(MobKindName(k), x0 + 50, y + 17, 16, nameC);
+        const char *right = isUnlocked ? TextFormat("%d", cost) : UnlockMapFor(k);
+        int rw = MeasureText(right, isUnlocked ? 20 : 12);
+        DrawTextShadowed(right, x0 + colW - rw - 8, y + (isUnlocked ? 9 : 13), isUnlocked ? 20 : 12,
+                         isUnlocked ? (affordable ? (Color){ 255, 190, 90, 255 } : (Color){ 150, 90, 80, 255 })
+                                    : (Color){ 110, 100, 100, 255 });
+        y += rowH;
     }
+}
+
+// First seconds of a match: what you are and how to hurt him.
+static void DrawHowTo(int frames)
+{
+    if (frames <= 0) return;
+    unsigned char a = (unsigned char)((frames > 60 ? 1.0f : frames/60.0f)*230.0f);
+    static const char *LINES[] = {
+        "YOU ARE HELL.  Kill the marine before he flips the exit switch.",
+        "1-9 pick a demon, LEFT-CLICK to drop it. Out of his sight = cheap and instant.",
+        "Every point of damage he takes pays you a soul. Healing he finds is your loss.",
+        "F slams a door or recalls a lift. V blows a barrel. TAB shows his weaknesses.",
+    };
+    int w = 760, h = 40 + 4*26 + 20;
+    int x = GetScreenWidth()/2 - w/2, y = GetScreenHeight()/2 - h/2 - 60;
+    DrawRectangle(x, y, w, h, (Color){ 12, 6, 6, a });
+    DrawRectangleLines(x, y, w, h, (Color){ 220, 70, 50, a });
+    for (int i = 0; i < 4; i++) {
+        Color c = (i == 0) ? (Color){ 255, 110, 80, a } : (Color){ 235, 225, 215, a };
+        int fs = (i == 0) ? 22 : 17;
+        int tw = MeasureText(LINES[i], fs);
+        DrawTextShadowed(LINES[i], x + w/2 - tw/2, y + 20 + i*26, fs, c);
+    }
+    const char *dismiss = "press any key";
+    DrawTextShadowed(dismiss, x + w/2 - MeasureText(dismiss, 12)/2, y + h - 18, 12,
+                     (Color){ 150, 150, 150, a });
 }
 
 static void DrawPendingDrops(const Sim *sim, long frame)
@@ -1632,7 +1776,7 @@ int main(int argc, char **argv)
         StateLogClose();
         return 1;
     }
-    if (!LevelMeshBuild(&lm, &map)) {
+    if (!LevelMeshBuild(&lm, &map, &wad)) {
         TraceLog(LOG_ERROR, "MAIN: failed to build level mesh for '%s'", curMap);
         MapFree(&map);
         WadFree(&wad);
@@ -1668,11 +1812,11 @@ int main(int argc, char **argv)
         for (int m = 0; m < sim.mobCount; m++) if (sim.mobs[m].state != MOB_DEAD) alive++;
         printf("{\"map\":\"%s\",\"autodrop\":%s,\"result\":\"%s\",\"tic\":%ld,"
                "\"secs\":%.1f,\"hp\":%d,\"armor\":%d,\"weapon\":\"%s\",\"kills\":%ld,"
-               "\"alive\":%d,\"replans\":%d,\"dmg_taken\":%ld,\"souls\":%.0f}\n",
+               "\"alive\":%d,\"replans\":%d,\"dmg_taken\":%ld,\"souls\":%.0f,\"nav_skips\":%d}\n",
                curMap, opt.autodrop ? "true" : "false", DGStateName(sim.dg.state),
                sim.tic, sim.tic/35.0, sim.dg.health, sim.dg.armor,
                DGWeaponName(sim.dg.weapon), sim.kills, alive, sim.dg.replans,
-               sim.dgDamageTaken, sim.souls);
+               sim.dgDamageTaken, sim.souls, sim.dg.navSkips);
         fflush(stdout);
         LogShutdown(0, sim.tic);
         StateLogClose();
@@ -1689,6 +1833,13 @@ int main(int argc, char **argv)
     if (!GameSpritesLoad(&gsprites, &wad)) {
         TraceLog(LOG_WARNING, "MAIN: no sprites in WAD, using shape renderer");
     }
+    {
+        const char *mdir = getenv("HELLDROP_MODEL_DIR");
+        if (GameModelsLoad(&gmodels, mdir ? mdir : "assets/models")) {
+            GameModelsRenderPortraits(&gmodels);
+            TraceLog(LOG_INFO, "MAIN: 3D models loaded (M toggles sprites)");
+        }
+    }
     InitAudioDevice();
     GameAudioLoad(&gaudio, &wad);
     kit_background_apply();
@@ -1699,7 +1850,9 @@ int main(int argc, char **argv)
     selectedKind = MK_PINKY;
     dropMsg[0] = '\0';
     dropMsgFrames = 0;
-    codexOpen = opt.selftest;        // selftest screenshots include it
+    codexOpen = false;
+    howtoFrames = opt.selftest ? 0 : 60*20;
+    debugHud = false;
     intentPrev[0] = '\0';
     intentFlash = 0;
     doomcamOn = true;
@@ -1767,6 +1920,16 @@ static bool HelldropFrame(void)
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
         CameraUpdate(&vs, dt);
+        if (vs.follow) {
+            Vector3 want = { sim.dg.pos.x, sim.dg.z, -sim.dg.pos.y };
+            float k = 1.0f - expf(-dt*5.0f);   // smooth, frame-rate independent
+            vs.target = Vector3Add(vs.target, Vector3Scale(Vector3Subtract(want, vs.target), k));
+        }
+        if (IsKeyPressed(KEY_F1)) { debugHud = !debugHud; LogInput(debugHud ? "debug_on" : "debug_off"); }
+        if (howtoFrames > 0) {
+            howtoFrames--;
+            if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) howtoFrames = 0;
+        }
         Camera3D cam = CameraFromView(&vs);
 
         if (IsKeyPressed(KEY_G)) {
@@ -1835,6 +1998,10 @@ static bool HelldropFrame(void)
         if (IsKeyPressed(KEY_TAB)) {
             codexOpen = !codexOpen;
             LogInput(codexOpen ? "codex_open" : "codex_close");
+        }
+        if (IsKeyPressed(KEY_M) && gmodels.any) {
+            gmodels.enabled = !gmodels.enabled;
+            LogInput(gmodels.enabled ? "models_on" : "models_off");
         }
         if (IsKeyPressed(KEY_C)) {
             doomcamOn = !doomcamOn;
@@ -1991,8 +2158,9 @@ static bool HelldropFrame(void)
                                   ? "SPACE: the invasion advances" : NULL;
         DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo,
                 campLabel, winHint);
-        DrawSoulsPanel(&sim, selectedKind, unlocked);
+        DrawSoulsPanel(&sim, selectedKind, unlocked, &gsprites);
         if (codexOpen) DrawCodex();
+        DrawHowTo(howtoFrames);
         if (campaignComplete) DrawCampaignComplete();
         FaceStateUpdate(&faceState, &sim);
         DrawStatusBar(&hud, &sim, &faceState, frame);
@@ -2067,6 +2235,7 @@ static void MainCleanup(void)
     UnloadRenderTexture(doomcamRT);
     GameAudioUnload(&gaudio);
     CloseAudioDevice();
+    GameModelsUnload(&gmodels);
     GameSpritesUnload(&gsprites);
     DoomHudUnload(&hud);
     SimFree(&sim);

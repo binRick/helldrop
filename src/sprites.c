@@ -1,6 +1,7 @@
 #include "sprites.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "doomgfx.h"
@@ -32,6 +33,32 @@ static const MobAnim MOB_ANIM[MK_COUNT] = {
     [MK_MANCUBUS]      = { "FATT", "ABCDEF", "GHI", 'J', "KLMNOPQRST", NULL },
     [MK_PAINELEMENTAL] = { "PAIN", "ABC",    "DEF", 'G', "HIJKLM", NULL },
 };
+
+// Static map decorations (and pickups the sim doesn't simulate yet), by
+// doomednum: sprite name + vanilla animation frame sequence. Hanging
+// ceiling gore is omitted: there are no ceilings in the iso view.
+typedef struct DecoDef { int ednum; const char *lump; const char *seq; } DecoDef;
+static const DecoDef DECO[] = {
+    { 2028, "COLU", "A" }, { 30, "COL1", "A" }, { 31, "COL2", "A" }, { 32, "COL3", "A" },
+    { 33, "COL4", "A" }, { 36, "COL5", "AB" }, { 37, "COL6", "A" }, { 34, "CAND", "A" },
+    { 35, "CBRA", "A" }, { 41, "CEYE", "ABCB" }, { 42, "FSKU", "ABC" }, { 43, "TRE1", "A" },
+    { 44, "TBLU", "ABCD" }, { 45, "TGRN", "ABCD" }, { 46, "TRED", "ABCD" }, { 47, "SMIT", "A" },
+    { 48, "ELEC", "A" }, { 54, "TRE2", "A" }, { 55, "SMBT", "ABCD" }, { 56, "SMGT", "ABCD" },
+    { 57, "SMRT", "ABCD" }, { 70, "FCAN", "ABC" }, { 85, "TLMP", "ABCD" }, { 86, "TLP2", "ABCD" },
+    { 10, "PLAY", "W" }, { 12, "PLAY", "W" }, { 15, "PLAY", "N" }, { 24, "POL5", "A" },
+    { 18, "POSS", "L" }, { 19, "SPOS", "L" }, { 20, "TROO", "M" }, { 21, "SARG", "N" },
+    { 22, "HEAD", "L" }, { 23, "SKUL", "K" }, { 25, "POL1", "A" }, { 26, "POL6", "AB" },
+    { 27, "POL4", "A" }, { 28, "POL2", "A" }, { 29, "POL3", "AB" }, { 79, "POB1", "A" },
+    { 80, "POB2", "A" }, { 81, "BRS1", "A" },
+    { 5, "BKEY", "AB" }, { 6, "YKEY", "AB" }, { 13, "RKEY", "AB" },
+    { 38, "RSKU", "AB" }, { 39, "YSKU", "AB" }, { 40, "BSKU", "AB" },
+    { 2013, "SOUL", "ABCDCB" }, { 2014, "BON1", "ABCDCB" }, { 2015, "BON2", "ABCDCB" },
+    { 2019, "ARM2", "AB" }, { 2022, "PINV", "ABCD" }, { 2023, "PSTR", "A" },
+    { 2024, "PINS", "ABCD" }, { 2025, "SUIT", "A" }, { 2026, "PMAP", "ABCDCB" },
+    { 2045, "PVIS", "AB" }, { 8, "BPAK", "A" }, { 2004, "PLAS", "A" }, { 2005, "CSAW", "A" },
+    { 2006, "BFUG", "A" }, { 17, "CELP", "A" }, { 2047, "CELL", "A" }, { 83, "MEGA", "ABCD" },
+};
+#define DECO_COUNT ((int)(sizeof(DECO)/sizeof(DECO[0])))
 
 static const MobAnim PLAYER_ANIM = { "PLAY", "ABCD", "EF", 'G', "HIJKLMN", NULL };
 
@@ -141,6 +168,19 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
         SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal);
     }
 
+    // Decorations share sprite sets by name (PLAY/POSS corpses reuse the
+    // live sets' lumps but load their own copy: simple, and small).
+    gs->deco = (SpriteSet *)calloc((size_t)DECO_COUNT, sizeof(SpriteSet));
+    if (gs->deco) {
+        for (int d = 0; d < DECO_COUNT; d++) {
+            int same = -1;
+            for (int e = 0; e < d && same < 0; e++) if (strcmp(DECO[e].lump, DECO[d].lump) == 0) same = e;
+            if (same >= 0) { gs->decoAlias[d] = (short)same; continue; }
+            gs->decoAlias[d] = (short)d;
+            SpriteSetLoad(&gs->deco[d], wad, DECO[d].lump, pal);
+        }
+    }
+
     gs->alphaTest = LoadShaderFromMemory(NULL, ALPHA_TEST_FS);
     gs->valid = gs->player.any;
     for (int k = 0; k < MK_COUNT; k++) gs->valid = gs->valid || gs->mobs[k].any;
@@ -162,6 +202,10 @@ void GameSpritesUnload(GameSprites *gs)
     SpriteSetUnload(&gs->barrel);
     SpriteSetUnload(&gs->fire);
     for (int p = 0; p < PK_COUNT; p++) SpriteSetUnload(&gs->pickups[p]);
+    if (gs->deco) {
+        for (int d = 0; d < DECO_COUNT; d++) if (gs->decoAlias[d] == d) SpriteSetUnload(&gs->deco[d]);
+        free(gs->deco);
+    }
     if (gs->alphaTest.id != 0) UnloadShader(gs->alphaTest);
     memset(gs, 0, sizeof(*gs));
 }
@@ -317,4 +361,17 @@ void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
     Vector3 center = { base.x, base.y + h*0.5f + (float)f->botOfs[rot], base.z };
     DrawBillboardPro(cam, tex, src, center, (Vector3){ 0.0f, 1.0f, 0.0f },
                      (Vector2){ w, h }, (Vector2){ w*0.5f, h*0.5f }, 0.0f, tint);
+}
+
+const SpriteFrame *DecoSpriteFrame(const GameSprites *gs, int ednum, long tic)
+{
+    if (!gs->deco) return NULL;
+    for (int d = 0; d < DECO_COUNT; d++) {
+        if (DECO[d].ednum != ednum) continue;
+        const SpriteSet *set = &gs->deco[gs->decoAlias[d]];
+        if (!set->any) return NULL;
+        int n = (int)strlen(DECO[d].seq);
+        return Pick(set, DECO[d].seq[(tic/6) % n]);
+    }
+    return NULL;
 }
