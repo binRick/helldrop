@@ -1,0 +1,722 @@
+{
+ "_about": {
+  "units": "model units; at authoring scale 1 Doom map unit = 1/32 model unit. Multiply by doom_scale to stand exactly doom_height map units tall.",
+  "facing": "+Z (glTF), feet / hover ground point at the origin, Y up",
+  "clips": "raylib resamples at 60 fps; frames = keyframeCount from LoadModelAnimations",
+  "corpse": "hold the LAST frame of 'death'",
+  "rebuild": "tools/models/build_all.sh"
+ },
+ "archvile": {
+  "kind": "walker",
+  "height": 2.075,
+  "radius": 1.0824,
+  "tris": 10880,
+  "bones": 19,
+  "doom_height": 60.0,
+  "doom_radius": 20,
+  "doom_scale": 28.9157,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 61,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.7682
+ },
+ "baron": {
+  "kind": "walker",
+  "height": 2.2865,
+  "radius": 0.8238,
+  "tris": 11546,
+  "bones": 21,
+  "doom_height": 64.0,
+  "doom_radius": 24,
+  "doom_scale": 27.9904,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 65,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.648
+ },
+ "barrel": {
+  "kind": "prop",
+  "height": 1.0125,
+  "radius": 0.3469,
+  "tris": 1176,
+  "bones": 0,
+  "doom_height": 32.0,
+  "doom_radius": 10.0,
+  "doom_scale": 31.6049,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "caco": {
+  "kind": "flyer",
+  "height": 1.6991,
+  "radius": 0.7557,
+  "tris": 9418,
+  "bones": 6,
+  "doom_height": 56.0,
+  "doom_radius": 31,
+  "doom_scale": 32.9581,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 121,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 73,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 1.6737
+ },
+ "chaingunner": {
+  "kind": "walker",
+  "height": 1.8023,
+  "radius": 1.1254,
+  "tris": 7876,
+  "bones": 18,
+  "doom_height": 56.0,
+  "doom_radius": 20,
+  "doom_scale": 31.0717,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 61,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.6631
+ },
+ "hellknight": {
+  "kind": "walker",
+  "height": 2.2865,
+  "radius": 0.8238,
+  "tris": 11546,
+  "bones": 21,
+  "doom_height": 64.0,
+  "doom_radius": 24,
+  "doom_scale": 27.9904,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 65,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.648
+ },
+ "imp": {
+  "kind": "walker",
+  "height": 1.8111,
+  "radius": 0.7547,
+  "tris": 12236,
+  "bones": 21,
+  "doom_height": 56.0,
+  "doom_radius": 20,
+  "doom_scale": 30.9205,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 51,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.7282
+ },
+ "lostsoul": {
+  "kind": "flyer",
+  "height": 0.8438,
+  "radius": 0.5217,
+  "tris": 4298,
+  "bones": 6,
+  "doom_height": 30.0,
+  "doom_radius": 16,
+  "doom_scale": 35.5556,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {
+   "idle": {
+    "frames": 121,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 73,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.7875
+ },
+ "mancubus": {
+  "kind": "walker",
+  "height": 1.9563,
+  "radius": 1.2921,
+  "tris": 8156,
+  "bones": 19,
+  "doom_height": 64.0,
+  "doom_radius": 48,
+  "doom_scale": 32.7144,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 73,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 1.3763
+ },
+ "marine": {
+  "kind": "walker",
+  "height": 1.8317,
+  "radius": 1.1078,
+  "tris": 11676,
+  "bones": 18,
+  "doom_height": 56.0,
+  "doom_radius": 16,
+  "doom_scale": 30.5731,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 61,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.7378
+ },
+ "painelemental": {
+  "kind": "flyer",
+  "height": 1.7304,
+  "radius": 0.9273,
+  "tris": 5530,
+  "bones": 5,
+  "doom_height": 56.0,
+  "doom_radius": 31,
+  "doom_scale": 32.3617,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 121,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 73,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 1.6303
+ },
+ "pinky": {
+  "kind": "walker",
+  "height": 1.5384,
+  "radius": 1.0817,
+  "tris": 9534,
+  "bones": 21,
+  "doom_height": 56.0,
+  "doom_radius": 30,
+  "doom_scale": 36.4019,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 49,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 1.3114
+ },
+ "pk_armor": {
+  "kind": "prop",
+  "height": 0.5969,
+  "radius": 0.367,
+  "tris": 956,
+  "bones": 0,
+  "doom_height": 20.0,
+  "doom_radius": 12.0,
+  "doom_scale": 33.5079,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_chaingun": {
+  "kind": "prop",
+  "height": 0.2969,
+  "radius": 0.6369,
+  "tris": 648,
+  "bones": 0,
+  "doom_height": 10.0,
+  "doom_radius": 16.0,
+  "doom_scale": 33.6842,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_clip": {
+  "kind": "prop",
+  "height": 0.2868,
+  "radius": 0.181,
+  "tris": 396,
+  "bones": 0,
+  "doom_height": 10.0,
+  "doom_radius": 6.0,
+  "doom_scale": 34.8667,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_clipbox": {
+  "kind": "prop",
+  "height": 0.4314,
+  "radius": 0.3273,
+  "tris": 1036,
+  "bones": 0,
+  "doom_height": 12.0,
+  "doom_radius": 12.0,
+  "doom_scale": 27.8146,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_medikit": {
+  "kind": "prop",
+  "height": 0.3864,
+  "radius": 0.3768,
+  "tris": 924,
+  "bones": 0,
+  "doom_height": 12.0,
+  "doom_radius": 12.0,
+  "doom_scale": 31.0522,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_rlaunch": {
+  "kind": "prop",
+  "height": 0.3281,
+  "radius": 0.5472,
+  "tris": 596,
+  "bones": 0,
+  "doom_height": 12.0,
+  "doom_radius": 18.0,
+  "doom_scale": 36.5714,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_rocket": {
+  "kind": "prop",
+  "height": 0.1891,
+  "radius": 0.3838,
+  "tris": 320,
+  "bones": 0,
+  "doom_height": 6.0,
+  "doom_radius": 12.0,
+  "doom_scale": 31.7355,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_rocketbox": {
+  "kind": "prop",
+  "height": 0.4707,
+  "radius": 0.448,
+  "tris": 1284,
+  "bones": 0,
+  "doom_height": 14.0,
+  "doom_radius": 14.0,
+  "doom_scale": 29.7453,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_shellbox": {
+  "kind": "prop",
+  "height": 0.3313,
+  "radius": 0.2827,
+  "tris": 1404,
+  "bones": 0,
+  "doom_height": 12.0,
+  "doom_radius": 12.0,
+  "doom_scale": 36.2264,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_shells": {
+  "kind": "prop",
+  "height": 0.2812,
+  "radius": 0.2305,
+  "tris": 440,
+  "bones": 0,
+  "doom_height": 8.0,
+  "doom_radius": 8.0,
+  "doom_scale": 28.4444,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_shotgun": {
+  "kind": "prop",
+  "height": 0.1642,
+  "radius": 0.6582,
+  "tris": 408,
+  "bones": 0,
+  "doom_height": 8.0,
+  "doom_radius": 16.0,
+  "doom_scale": 48.7067,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "pk_stimpack": {
+  "kind": "prop",
+  "height": 0.1734,
+  "radius": 0.3282,
+  "tris": 512,
+  "bones": 0,
+  "doom_height": 6.0,
+  "doom_radius": 7.0,
+  "doom_scale": 34.5946,
+  "texture": [
+   512,
+   512
+  ],
+  "clips": {}
+ },
+ "revenant": {
+  "kind": "walker",
+  "height": 1.9544,
+  "radius": 0.7027,
+  "tris": 14700,
+  "bones": 19,
+  "doom_height": 64.0,
+  "doom_radius": 20,
+  "doom_scale": 32.747,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 57,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.6601
+ },
+ "shotgunner": {
+  "kind": "walker",
+  "height": 1.7727,
+  "radius": 1.1739,
+  "tris": 8200,
+  "bones": 18,
+  "doom_height": 56.0,
+  "doom_radius": 20,
+  "doom_scale": 31.5907,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 61,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.5468
+ },
+ "zombie": {
+  "kind": "walker",
+  "height": 1.7759,
+  "radius": 1.1409,
+  "tris": 8808,
+  "bones": 18,
+  "doom_height": 56.0,
+  "doom_radius": 20,
+  "doom_scale": 31.5333,
+  "texture": [
+   1024,
+   1024
+  ],
+  "clips": {
+   "idle": {
+    "frames": 97,
+    "fps": 60
+   },
+   "walk": {
+    "frames": 73,
+    "fps": 60
+   },
+   "attack": {
+    "frames": 43,
+    "fps": 60
+   },
+   "pain": {
+    "frames": 19,
+    "fps": 60
+   },
+   "death": {
+    "frames": 61,
+    "fps": 60
+   }
+  },
+  "corpse_height": 0.5774
+ }
+}

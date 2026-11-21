@@ -191,7 +191,13 @@ change** (`statelog.h` has the writer API).
   in `assets/models/` (built by `tools/models/`): clips idle/walk/attack/
   pain/death chosen from sim state, key + rim light, HUD portraits. Every
   model is optional — missing ones fall back to the WAD sprite.
-  `HELLDROP_MODEL_DIR` overrides the directory.
+  `HELLDROP_MODEL_DIR` overrides the directory. Rebuild the roster with
+  `tools/models/build_all.sh [names...]` (Blender on the mini host by default,
+  `BLENDER_HOST=local` to run here); it validates every GLB in raylib and
+  writes `assets/models/manifest.json` + contact sheets in
+  `build/model_previews/`. All designs are original (role-equivalents, not
+  id's monsters). `--viewer` (+ `--selftest`) shows every model cycling its
+  clips on a depth-tested floor — check new models there first.
 - Dynamic point lights (main.c `UpdateDynamicLights`): blasts, missiles,
   arch-vile fire and muzzle flashes light the level and the models.
 - `src/doomgfx.c` — Doom picture-format (patch) decoder via PLAYPAL: the
