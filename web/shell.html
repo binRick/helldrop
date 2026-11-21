@@ -85,6 +85,9 @@
 
     var Module = {
       canvas: canvas,
+      // Cache-bust: the build stamps its git revision here (Makefile), so a
+      // returning visitor never pairs new code with a stale .wasm/.data.
+      locateFile: function (p) { return p + '?v=HELLDROP_REV'; },
       print:    function (t) { console.log(t); },
       printErr: function (t) { console.error(t); },
       setStatus: function (text) {

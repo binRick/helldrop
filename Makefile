@@ -184,6 +184,9 @@ web-raylib: $(RAYLIB_WEB_A)
 $(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(HELLDROP_WAD) $(MODEL_GLBS) | $(WEBDIR)
 	@command -v emcc >/dev/null || { echo "error: emcc not on PATH — activate emscripten (emsdk_env.sh)"; exit 1; }
 	emcc $(SRC) $(RAYLIB_WEB_A) $(WEBCFLAGS) $(WEBLDFLAGS) -o $@
+	@rev=$(git rev-parse --short HEAD 2>/dev/null || date +%s); \
+	  sed -i '' -e "s/HELLDROP_REV/$rev/g" -e "s/src=index.js>/src=index.js?v=$rev>/" -e "s/src=\"index.js\"/src=\"index.js?v=$rev\"/" $@; \
+	  echo "web build stamped v=$rev"
 
 web-serve: web
 	@echo "Serving $(WEBDIR) at http://localhost:8000/ — Ctrl-C to stop"
