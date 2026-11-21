@@ -18,6 +18,8 @@
 #include "sprites.h"
 #include "sound.h"
 #include "statelog.h"
+#define KIT_BACKGROUND_IMPLEMENTATION
+#include "kit_background.h"
 
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
@@ -45,6 +47,9 @@ typedef struct Options {
     long turbo;            // sim speed multiplier (1 = real time)
     const char *dumpDir;   // --dump-frames <dir>: PNG per frame (media capture)
     long dumpEvery;        // --dump-every <N>: dump cadence in frames
+    long simOnly;          // --simonly <tics>: headless match, prints outcome JSON
+    int garrisonSkill;     // --garrison-skill <1|2|4>: map-thing skill bit (balance)
+    int garrisonDmg;       // --garrison-dmg <pct>: native monster damage (balance)
 } Options;
 
 typedef struct ViewState {
@@ -81,6 +86,9 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     opt->turbo = 1;
     opt->dumpDir = NULL;
     opt->dumpEvery = 1;
+    opt->simOnly = 0;
+    opt->garrisonSkill = -1;
+    opt->garrisonDmg = -1;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--wad") == 0 && i + 1 < argc) {
@@ -106,6 +114,18 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
                 return false;
         } else if (strcmp(argv[i], "--dump-frames") == 0 && i + 1 < argc) {
             opt->dumpDir = argv[++i];
+        } else if (strcmp(argv[i], "--simonly") == 0 && i + 1 < argc) {
+            char *end = NULL;
+            opt->simOnly = strtol(argv[++i], &end, 10);
+            if (end == argv[i] || *end != '\0' || opt->simOnly <= 0) return false;
+        } else if (strcmp(argv[i], "--garrison-skill") == 0 && i + 1 < argc) {
+            opt->garrisonSkill = atoi(argv[++i]);
+            if (opt->garrisonSkill < 1 || opt->garrisonSkill > 4) return false;
+        } else if (strcmp(argv[i], "--garrison-dmg") == 0 && i + 1 < argc) {
+            opt->garrisonDmg = atoi(argv[++i]);
+            if (opt->garrisonDmg < 1 || opt->garrisonDmg > 400) return false;
+        } else if (strcmp(argv[i], "--bg") == 0 || strcmp(argv[i], "--show") == 0) {
+            // handled by kit_window_flags (hidden, unfocused, silent test runs)
         } else if (strcmp(argv[i], "--dump-every") == 0 && i + 1 < argc) {
             char *end = NULL;
             opt->dumpEvery = strtol(argv[++i], &end, 10);
@@ -669,7 +689,13 @@ static void LogSnapshot(const ViewState *vs, const Sim *sim)
     StateLogFloat("angle", sim->dg.angleDeg);
     StateLogStr("state", DGStateName(sim->dg.state));
     StateLogStr("objective", (sim->dg.objective == OBJ_HEAL) ? "heal"
-                : (sim->dg.objective == OBJ_WEAPON) ? "weapon" : "exit");
+                : (sim->dg.objective == OBJ_WEAPON) ? "weapon"
+                : (sim->dg.objective == OBJ_SWITCH) ? "switch" : "exit");
+    StateLogInt("switch_line", sim->dg.switchLine);
+    StateLogInt("nav_skips", sim->dg.navSkips);
+    StateLogInt("no_progress_tics", sim->dg.noProgressTics);
+    StateLogInt("heal_retry_tic", sim->dg.healRetryTic);
+    StateLogInt("next_plan_tic", sim->dg.nextPlanTic);
     StateLogInt("sector", sim->dg.sector);
     StateLogInt("health", sim->dg.health);
     StateLogInt("armor", sim->dg.armor);
@@ -1510,6 +1536,7 @@ static bool campaign;
 static char curMap[9];
 
 static bool HelldropFrame(void);   // one game-loop iteration (false => stop)
+static void AutodropTick(Sim *simp);
 static void MainCleanup(void);
 #ifdef PLATFORM_WEB
 static void HelldropFrameWeb(void);
@@ -1532,13 +1559,23 @@ int main(int argc, char **argv)
     opt.wadExplicit = true;          // no IWAD auto-detection on web
 #endif
 
+    {
+        SimTuning tn = SimGetTuning();
+        if (opt.garrisonSkill > 0) tn.garrisonSkillBit = (unsigned)opt.garrisonSkill;
+        if (opt.garrisonDmg > 0) tn.garrisonDmgPct = opt.garrisonDmg;
+        SimSetTuning(tn);
+    }
     if (!opt.noLog && !StateLogOpen(NULL)) {
         fprintf(stderr, "helldrop: state log unavailable, continuing without\n");
     }
     LogStartup();
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    // Runs that quit by themselves are tests: no window, focus, Dock tile or sound.
+    if (opt.selftest || opt.exitAfter > 0 || opt.dumpDir || opt.simOnly) kit_background(1);
+    SetConfigFlags(kit_window_flags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT,
+                                    argc, argv));
     InitWindow(1600, 900, "HELLDROP");
+    kit_background_apply();   // hidden runs leave the Dock before any loading
 #ifdef PLATFORM_WEB
     // requestAnimationFrame drives cadence on web; calling SetTargetFPS would
     // make raylib's EndDrawing() block in WaitTime()->emscripten_sleep, which
@@ -1618,6 +1655,31 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    // Headless match harness: play the whole level as fast as the CPU allows
+    // (no rendering) and print the outcome as one JSON line on stdout.
+    if (opt.simOnly > 0) {
+        while (sim.tic < opt.simOnly && sim.dg.state != DG_DEAD &&
+               sim.dg.state != DG_EXITED && sim.dg.state != DG_NO_GOAL) {
+            SimTick(&sim);
+            if (opt.autodrop) AutodropTick(&sim);
+            if (sim.tic % 175 == 0) { StateLogSetFrame(sim.tic); LogSnapshot(&vs, &sim); }
+        }
+        int alive = 0;
+        for (int m = 0; m < sim.mobCount; m++) if (sim.mobs[m].state != MOB_DEAD) alive++;
+        printf("{\"map\":\"%s\",\"autodrop\":%s,\"result\":\"%s\",\"tic\":%ld,"
+               "\"secs\":%.1f,\"hp\":%d,\"armor\":%d,\"weapon\":\"%s\",\"kills\":%ld,"
+               "\"alive\":%d,\"replans\":%d,\"dmg_taken\":%ld,\"souls\":%.0f}\n",
+               curMap, opt.autodrop ? "true" : "false", DGStateName(sim.dg.state),
+               sim.tic, sim.tic/35.0, sim.dg.health, sim.dg.armor,
+               DGWeaponName(sim.dg.weapon), sim.kills, alive, sim.dg.replans,
+               sim.dgDamageTaken, sim.souls);
+        fflush(stdout);
+        LogShutdown(0, sim.tic);
+        StateLogClose();
+        CloseWindow();
+        return 0;
+    }
+
     SetupView(&vs, &map);
 
     if (!DoomHudLoad(&hud, &wad)) {
@@ -1629,6 +1691,8 @@ int main(int argc, char **argv)
     }
     InitAudioDevice();
     GameAudioLoad(&gaudio, &wad);
+    kit_background_apply();
+    if (kit_in_background()) SetTargetFPS(0);   // test runs: measure real throughput
 
     frame = 0;
     simAcc = 0.0;
@@ -1661,6 +1725,43 @@ int main(int argc, char **argv)
 // One iteration of the game loop. Returns false to stop (the native break
 // paths: level-load failure, selftest/exit-after). State lives at file scope
 // so emscripten_set_main_loop() can invoke this once per browser frame.
+static void AutodropTick(Sim *simp)
+{
+        // Dev smoke test: periodically drop a squad just ahead of him so
+        // combat/infighting/drops exercise without a human at the mouse.
+        if (simp->tic >= 400 && simp->tic % 400 == 0) {
+            // Exercise Hell's Hand: "click" the nearest barrel and the
+            // nearest door sector to him (cooldowns self-gate).
+            int nb = -1;
+            float nbd = 1e9f;
+            for (int b = 0; b < simp->barrelCount; b++) {
+                if (!simp->barrels[b].alive) continue;
+                float dx = simp->barrels[b].pos.x - simp->dg.pos.x;
+                float dy = simp->barrels[b].pos.y - simp->dg.pos.y;
+                if (dx*dx + dy*dy < nbd) { nbd = dx*dx + dy*dy; nb = b; }
+            }
+            if (nb >= 0) {
+                SimDetonateBarrel(simp, simp->barrels[nb].pos.x,
+                                  simp->barrels[nb].pos.y);
+            }
+            SimSlamMover(simp, simp->dg.pos.x, simp->dg.pos.y, NULL);
+        }
+        if (simp->tic >= 250 && simp->tic % 250 == 0) {
+            // Odd waves bring an arch-vile to bank the previous wave's
+            // corpses — the smoke test for resurrection.
+            static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_HELLKNIGHT, MK_CHAINGUNNER };
+            static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_MANCUBUS, MK_PAINELEMENTAL, MK_PINKY };
+            const MobKind *wave = ((simp->tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
+            float a = simp->dg.angleDeg*DEG2RAD;
+            for (int w = 0; w < 4; w++) {
+                float side = (w % 2 == 0) ? 60.0f : -60.0f;
+                SimDrop(simp, wave[w],
+                        simp->dg.pos.x + cosf(a)*200.0f - sinf(a)*side,
+                        simp->dg.pos.y + sinf(a)*200.0f + cosf(a)*side);
+            }
+        }
+}
+
 static bool HelldropFrame(void)
 {
         StateLogSetFrame(frame);
@@ -1808,39 +1909,7 @@ static bool HelldropFrame(void)
         if (simAcc > 0.5) simAcc = 0.5;
         while (simAcc >= SIM_TICTIME) {
             SimTick(&sim);
-            // Dev smoke test: periodically drop a squad just ahead of him so
-            // combat/infighting/drops exercise without a human at the mouse.
-            if (opt.autodrop && sim.tic >= 400 && sim.tic % 400 == 0) {
-                // Exercise Hell's Hand: "click" the nearest barrel and the
-                // nearest door sector to him (cooldowns self-gate).
-                int nb = -1;
-                float nbd = 1e9f;
-                for (int b = 0; b < sim.barrelCount; b++) {
-                    if (!sim.barrels[b].alive) continue;
-                    float dx = sim.barrels[b].pos.x - sim.dg.pos.x;
-                    float dy = sim.barrels[b].pos.y - sim.dg.pos.y;
-                    if (dx*dx + dy*dy < nbd) { nbd = dx*dx + dy*dy; nb = b; }
-                }
-                if (nb >= 0) {
-                    SimDetonateBarrel(&sim, sim.barrels[nb].pos.x,
-                                      sim.barrels[nb].pos.y);
-                }
-                SimSlamMover(&sim, sim.dg.pos.x, sim.dg.pos.y, NULL);
-            }
-            if (opt.autodrop && sim.tic >= 250 && sim.tic % 250 == 0) {
-                // Odd waves bring an arch-vile to bank the previous wave's
-                // corpses — the smoke test for resurrection.
-                static const MobKind WAVE_A[4] = { MK_PINKY, MK_REVENANT, MK_HELLKNIGHT, MK_CHAINGUNNER };
-                static const MobKind WAVE_B[4] = { MK_ARCHVILE, MK_MANCUBUS, MK_PAINELEMENTAL, MK_PINKY };
-                const MobKind *wave = ((sim.tic/250) % 2 == 0) ? WAVE_A : WAVE_B;
-                float a = sim.dg.angleDeg*DEG2RAD;
-                for (int w = 0; w < 4; w++) {
-                    float side = (w % 2 == 0) ? 60.0f : -60.0f;
-                    SimDrop(&sim, wave[w],
-                            sim.dg.pos.x + cosf(a)*200.0f - sinf(a)*side,
-                            sim.dg.pos.y + sinf(a)*200.0f + cosf(a)*side);
-                }
-            }
+            if (opt.autodrop) AutodropTick(&sim);
             simAcc -= SIM_TICTIME;
         }
         float simAlpha = (float)(simAcc / SIM_TICTIME);
@@ -1957,6 +2026,24 @@ static bool HelldropFrame(void)
         }
 
         if (frame % 12 == 0) LogSnapshot(&vs, &sim);
+        {   // perf: wall ms per frame, summarized once a second
+            static double last, acc, worst, winStart; static int n;
+            double now = GetTime();
+            if (last > 0) { double ms = (now - last)*1000.0; acc += ms; n++; if (ms > worst) worst = ms; }
+            last = now;
+            if (winStart == 0) winStart = now;
+            if (now - winStart >= 1.0 && n > 0) {
+                if (StateLogEnabled()) {
+                    StateLogBegin("perf");
+                    StateLogFloat("fps", n/(now - winStart));
+                    StateLogFloat("ms_avg", acc/n);
+                    StateLogFloat("ms_max", worst);
+                    StateLogInt("mobs", sim.mobCount);
+                    StateLogEnd();
+                }
+                acc = worst = 0; n = 0; winStart = now;
+            }
+        }
         frame++;
 
         if (opt.selftest && frame >= ((opt.exitAfter > 0) ? opt.exitAfter : 60)) {

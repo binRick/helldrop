@@ -4,7 +4,7 @@ CC = clang
 # compiles against the same version (same pattern as ../chernobyl). Bump
 # RAYLIB_TAG and `rm -rf vendor/raylib-src` to upgrade. Statically linked:
 # no Homebrew raylib needed at build or run time.
-RAYLIB_TAG ?= 6.0
+RAYLIB_TAG ?= 6.2
 RAYLIB_SRC ?= vendor/raylib-src
 RAYLIB_A    = $(RAYLIB_SRC)/src/libraylib.mac.a
 
@@ -22,7 +22,8 @@ CFLAGS  = -O2 -Wall -Wno-unused-result -std=c11 \
           -DGL_SILENCE_DEPRECATION
 LDFLAGS = $(RAYLIB_A) -lm \
           -framework OpenGL -framework Cocoa -framework IOKit \
-          -framework CoreAudio -framework CoreVideo -framework AudioToolbox
+          -framework CoreAudio -framework CoreVideo -framework AudioToolbox \
+          -framework QuartzCore
 
 # Built as a minimal .app bundle (same pattern as ../chernobyl) so macOS
 # shows the game's icon in cmd+tab/Dock; run.sh still execs the binary

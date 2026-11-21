@@ -43,7 +43,9 @@ typedef enum DGState {
     DG_NO_GOAL,     // no start, no exit, or no route
 } DGState;
 
-typedef enum DGObjective { OBJ_EXIT, OBJ_HEAL, OBJ_WEAPON } DGObjective;
+// OBJ_SWITCH: no route to the exit yet — go fire the nearest reachable
+// unused switch/walkover that might open one (progression hunting).
+typedef enum DGObjective { OBJ_EXIT, OBJ_HEAL, OBJ_WEAPON, OBJ_SWITCH } DGObjective;
 typedef enum DGWeapon { WPN_PISTOL, WPN_SHOTGUN, WPN_CHAINGUN, WPN_ROCKET } DGWeapon;
 
 typedef enum DoorState { DOOR_CLOSED, DOOR_OPENING, DOOR_OPEN, DOOR_CLOSING } DoorState;
@@ -262,6 +264,13 @@ typedef struct DoomGuy {
     int threatScanTics;
     int healPickup;         // pickup index RETREAT is heading for, -1
     int weaponPickup;       // pickup index OBJ_WEAPON is heading for, -1
+    int switchLine;         // linedef OBJ_SWITCH is heading for, -1
+    int navSkips;           // watchdog skips past nav dead-ends (should stay 0)
+    Vector2 progressGoal;   // objective point the watchdog measures against
+    float progressBest;     // closest approach to it so far
+    int noProgressTics;     // tics without a new closest approach
+    long healRetryTic;      // low-health heal search backs off until this tic
+    long nextPlanTic;       // failed-replan throttle
     Vector2 *wp;            // route waypoints (crossing midpoints + goal)
     float *wpFloor;         // floor height of the sector each wp enters
     int *wpDoor;            // door index the waypoint passes through, -1
@@ -313,6 +322,7 @@ typedef struct Sim {
     int liftCount;
     int *sectorLift;        // lift index per sector, -1
     unsigned char *lineUsed; // one-shot (W1/S1) trigger lines already fired
+    unsigned char *lineTried; // switch hunt: lines he already went to fire
     DoomGuy dg;
     Mob mobs[MOBS_MAX];
     int mobCount;           // compact prefix; corpses stay in the array
@@ -342,6 +352,14 @@ typedef struct Sim {
     unsigned char rnd[256];
     int rndIndex;
 } Sim;
+
+// Balance knobs for the map's native population (the "garrison").
+typedef struct SimTuning {
+    unsigned garrisonSkillBit;   // THINGS skill flag: 1 easy, 2 medium, 4 hard
+    int garrisonDmgPct;          // native monsters' damage to him, percent
+} SimTuning;
+void SimSetTuning(SimTuning t);
+SimTuning SimGetTuning(void);
 
 bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm);
 void SimFree(Sim *sim);

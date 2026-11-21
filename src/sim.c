@@ -13,6 +13,7 @@
 #define TURN_PER_TIC 20.0f     // degrees
 #define WP_ARRIVE 24.0f
 #define STUCK_TICS 70
+#define NAV_WATCHDOG_TICS (12*35)   // no closer to the objective in 12s: skip
 
 #define SIGHT_RANGE 1200.0f    // monster wake / DG threat-scan distance
 #define HITSCAN_RANGE 2048.0f
@@ -21,6 +22,7 @@
 #define MOB_HEIGHT 56.0f
 
 static bool PlanCurrentObjective(struct Sim *sim, const char *reason);
+static void DgUpdateGround(struct Sim *sim);
 static void DgSetState(struct Sim *sim, DGState st, const char *reason);
 static void DamageBarrel(struct Sim *sim, int idx, int dmg, int attackerMob);
 static int SpawnMob(struct Sim *sim, MobKind kind, float x, float y,
@@ -1356,8 +1358,17 @@ static bool SegClear(Sim *sim, Vector2 a, Vector2 b)
                 sim->lineStamp[li] = sim->stamp;
                 const Linedef *l = &sim->map->lines[li];
                 if (!PruneLineBlocks(sim, l)) continue;
-                if (SegsCross(a, b, sim->map->verts[l->v1], sim->map->verts[l->v2]))
-                    return false;
+                Vector2 la = sim->map->verts[l->v1], lb = sim->map->verts[l->v2];
+                if (SegsCross(a, b, la, lb)) return false;
+                // He is a circle, not a point: a shortcut that grazes a wall
+                // corner wedges him against it (the E1M4/M5/M8 stalls). Walls
+                // he is already touching at the start don't veto the move.
+                const float clr = DG_RADIUS - 1.0f;
+                Vector2 qa = SegClosest(la, lb, a);
+                if (Dist2D(qa, a) < clr) continue;
+                if (Dist2D(SegClosest(la, lb, b), b) < clr ||
+                    Dist2D(SegClosest(a, b, la), la) < clr ||
+                    Dist2D(SegClosest(a, b, lb), lb) < clr) return false;
             }
         }
     }
@@ -1632,10 +1643,25 @@ static void DamageMob(Sim *sim, int idx, int dmg, int attackerMob)
     }
 }
 
+// Tuned with the --simonly harness across E1M1-E1M8 (2026-11): at the old
+// Hurt-Me-Plenty/full-damage baseline he died unaided on 7 of 8 maps, so the
+// player "won" by watching. Easy-skill garrison at 45% damage: he clears 7/8
+// unaided with 36-100 HP left, and scripted drops still kill him everywhere.
+static SimTuning g_tuning = { .garrisonSkillBit = 0x01, .garrisonDmgPct = 45 };
+void SimSetTuning(SimTuning t) { g_tuning = t; }
+SimTuning SimGetTuning(void) { return g_tuning; }
+
 static void DamageDG(Sim *sim, int dmg, int attackerMob)
 {
     DoomGuy *dg = &sim->dg;
     if (dg->state == DG_DEAD || dg->state == DG_EXITED) return;
+    // The map's own garrison is idle muscle; Hell's hand-picked drops hit at
+    // full strength. This is what makes YOUR demons the threat that matters.
+    if (attackerMob >= 0 && !sim->mobs[attackerMob].playerDropped &&
+        g_tuning.garrisonDmgPct != 100) {
+        dmg = (dmg*g_tuning.garrisonDmgPct + 50)/100;
+        if (dmg < 1) dmg = 1;
+    }
     // The Pain Tithe: every point of damage dealt to him is a soul earned.
     // Healing he picks up is never refunded — a medikit is a pure loss.
     sim->souls += (float)dmg;
@@ -2309,6 +2335,32 @@ static void MobTick(Sim *sim, int idx)
     }
 }
 
+typedef struct HeapNode { float f; int node; } HeapNode;
+
+static void HeapPush(HeapNode *h, int *hn, int cap, float f, int node)
+{
+    if (*hn >= cap) return;
+    int i = (*hn)++;
+    h[i] = (HeapNode){ f, node };
+    while (i > 0 && h[(i - 1)/2].f > h[i].f) {
+        HeapNode t = h[i]; h[i] = h[(i - 1)/2]; h[(i - 1)/2] = t; i = (i - 1)/2;
+    }
+}
+
+static int HeapPop(HeapNode *h, int *hn)
+{
+    int top = h[0].node;
+    h[0] = h[--(*hn)];
+    for (int i = 0;;) {
+        int l = 2*i + 1, r = l + 1, m = i;
+        if (l < *hn && h[l].f < h[m].f) m = l;
+        if (r < *hn && h[r].f < h[m].f) m = r;
+        if (m == i) break;
+        HeapNode t = h[i]; h[i] = h[m]; h[m] = t; i = m;
+    }
+    return top;
+}
+
 typedef struct ANode {
     float g;
     Vector2 entry;
@@ -2344,23 +2396,23 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
     }
 
     ANode *n = (ANode *)calloc((size_t)nodeCount, sizeof(ANode));
-    if (!n) return false;
+    // Binary-heap open list (lazy deletion): the old linear scan made a
+    // failed search O(N^2) — seconds per replan on big maps.
+    int hcap = estart[nodeCount] + 2, hn = 0;
+    HeapNode *h = (HeapNode *)malloc((size_t)hcap * sizeof(HeapNode));
+    if (!n || !h) { free(n); free(h); return false; }
     n[startNode] = (ANode){ 0.0f, dg->pos, -1, -1, 1 };
+    HeapPush(h, &hn, hcap, Dist2D(dg->pos, goalPos), startNode);
     bool found = false;
-    for (;;) {
-        int cur = -1;
-        float bestF = FLT_MAX;
-        for (int s = 0; s < nodeCount; s++) {
-            if (n[s].state != 1) continue;
-            float f = n[s].g + Dist2D(n[s].entry, goalPos);
-            if (f < bestF) { bestF = f; cur = s; }
-        }
-        if (cur < 0) break;
+    while (hn > 0) {
+        int cur = HeapPop(h, &hn);
+        if (n[cur].state == 2) continue;
         if (cur == goalNode) { found = true; break; }
         n[cur].state = 2;
         for (int e = estart[cur]; e < estart[cur + 1]; e++) {
             const NavEdge *E = &edges[e];
             if (triGraph && sim->tEdgeBlocked && sim->tEdgeBlocked[e]) continue;
+            if (n[E->to].state == 2) continue;
             float ng = n[cur].g + Dist2D(n[cur].entry, E->wp)
                      + ((E->door >= 0) ? DOOR_COST : 0.0f);
             if (n[E->to].state == 0 || ng < n[E->to].g - 0.01f) {
@@ -2369,9 +2421,11 @@ static bool RouteOnGraph(Sim *sim, const NavEdge *edges, const int *estart,
                 n[E->to].parentNode = cur;
                 n[E->to].parentEdge = e;
                 n[E->to].state = 1;
+                HeapPush(h, &hn, hcap, ng + Dist2D(E->wp, goalPos), E->to);
             }
         }
     }
+    free(h);
     if (!found) { free(n); return false; }
 
     int len = 0;
@@ -2414,34 +2468,24 @@ static bool RouteExists(Sim *sim, Vector2 from, Vector2 to)
     int goalNode = TriAtPoint(sim, to.x, to.y);
     if (startNode < 0 || goalNode < 0 || sim->triCount <= 0) return false;
     if (startNode == goalNode) return true;
-    ANode *n = (ANode *)calloc((size_t)sim->triCount, sizeof(ANode));
-    if (!n) return false;
-    n[startNode] = (ANode){ 0.0f, from, -1, -1, 1 };
+    // Existence only: plain BFS, O(V+E).
+    unsigned char *seen = (unsigned char *)calloc((size_t)sim->triCount, 1);
+    int *q = (int *)malloc((size_t)sim->triCount * sizeof(int));
+    if (!seen || !q) { free(seen); free(q); return false; }
+    int qh = 0, qt = 0;
+    q[qt++] = startNode; seen[startNode] = 1;
     bool found = false;
-    for (;;) {
-        int cur = -1;
-        float bestF = FLT_MAX;
-        for (int s = 0; s < sim->triCount; s++) {
-            if (n[s].state != 1) continue;
-            float f = n[s].g + Dist2D(n[s].entry, to);
-            if (f < bestF) { bestF = f; cur = s; }
-        }
-        if (cur < 0) break;
-        if (cur == goalNode) { found = true; break; }
-        n[cur].state = 2;
+    while (qh < qt && !found) {
+        int cur = q[qh++];
         for (int e = sim->tEdgeStart[cur]; e < sim->tEdgeStart[cur + 1]; e++) {
-            const NavEdge *E = &sim->tEdges[e];
-            float ng = n[cur].g + Dist2D(n[cur].entry, E->wp);
-            if (n[E->to].state == 0 || ng < n[E->to].g - 0.01f) {
-                n[E->to].g = ng;
-                n[E->to].entry = E->wp;
-                n[E->to].parentNode = cur;
-                n[E->to].parentEdge = e;
-                n[E->to].state = 1;
-            }
+            int t = sim->tEdges[e].to;
+            if (seen[t]) continue;
+            if (t == goalNode) { found = true; break; }
+            seen[t] = 1;
+            q[qt++] = t;
         }
     }
-    free(n);
+    free(seen); free(q);
     return found;
 }
 
@@ -2451,11 +2495,18 @@ static const char *ObjectiveName(DGObjective o)
     case OBJ_EXIT:   return "exit";
     case OBJ_HEAL:   return "heal";
     case OBJ_WEAPON: return "weapon";
+    case OBJ_SWITCH: return "switch";
     }
     return "?";
 }
 
+static bool PlanPathToEx(Sim *sim, Vector2 goalPos, const char *reason, bool allowSector);
 static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
+{
+    return PlanPathToEx(sim, goalPos, reason, true);
+}
+
+static bool PlanPathToEx(Sim *sim, Vector2 goalPos, const char *reason, bool allowSector)
 {
     DoomGuy *dg = &sim->dg;
     free(dg->wp);
@@ -2485,13 +2536,15 @@ static bool PlanPathTo(Sim *sim, Vector2 goalPos, const char *reason)
                               startTri, goalTri, goalPos, goalSector, true);
             if (ok) method = "tri";
         }
-        if (!ok && dg->sector >= 0) {
+        if (!ok && allowSector && dg->sector >= 0) {
             ok = RouteOnGraph(sim, sim->edges, sim->edgeStart, sim->map->sectorCount,
                               dg->sector, goalSector, goalPos, goalSector, false);
             if (ok) method = "sector";
         }
     }
-    if (ok) PruneRoute(sim);
+    // A stuck replan walks the raw crossing midpoints: shortcuts are what
+    // wedged him, so the retry must not reproduce the same corner cut.
+    if (ok && strcmp(reason, "stuck") != 0) PruneRoute(sim);
 
     if (!ok) {
         TraceLog(LOG_WARNING,
@@ -2537,6 +2590,156 @@ static int NearestWantedWeapon(const Sim *sim)
 // arsenal ladder (he routes for un-owned weapons like a speedrunner — his
 // power-ups ARE the difficulty curve), then the exit. Only a failed exit
 // route is fatal (NO_GOAL).
+// Single-source shortest walking distance over the triangle graph (binary
+// heap Dijkstra). FLT_MAX = unreachable. Caller frees.
+static float *TriDistField(Sim *sim, Vector2 from)
+{
+    int n = sim->triCount, start = TriAtPoint(sim, from.x, from.y);
+    if (n <= 0 || start < 0) return NULL;
+    float *g = (float *)malloc((size_t)n * sizeof(float));
+    Vector2 *entry = (Vector2 *)malloc((size_t)n * sizeof(Vector2));
+    int cap = sim->tEdgeCount + 2;
+    struct HN { float g; int t; } *h = malloc((size_t)cap * sizeof(*h));
+    if (!g || !entry || !h) { free(g); free(entry); free(h); return NULL; }
+    for (int i = 0; i < n; i++) g[i] = FLT_MAX;
+    int hn = 0;
+    g[start] = 0.0f; entry[start] = from;
+    h[hn++] = (struct HN){ 0.0f, start };
+    while (hn > 0) {
+        struct HN top = h[0];
+        h[0] = h[--hn];
+        for (int i = 0;;) {   // sift down
+            int l = 2*i + 1, r = l + 1, m = i;
+            if (l < hn && h[l].g < h[m].g) m = l;
+            if (r < hn && h[r].g < h[m].g) m = r;
+            if (m == i) break;
+            struct HN t = h[i]; h[i] = h[m]; h[m] = t; i = m;
+        }
+        if (top.g > g[top.t]) continue;
+        int cur = top.t;
+        for (int e = sim->tEdgeStart[cur]; e < sim->tEdgeStart[cur + 1]; e++) {
+            const NavEdge *E = &sim->tEdges[e];
+            if (sim->tEdgeBlocked && sim->tEdgeBlocked[e]) continue;
+            float ng = g[cur] + Dist2D(entry[cur], E->wp);
+            if (ng < g[E->to] - 0.01f && hn < cap) {
+                g[E->to] = ng; entry[E->to] = E->wp;
+                int i = hn++;
+                h[i] = (struct HN){ ng, E->to };
+                while (i > 0 && h[(i - 1)/2].g > h[i].g) {   // sift up
+                    struct HN t = h[i]; h[i] = h[(i - 1)/2]; h[(i - 1)/2] = t; i = (i - 1)/2;
+                }
+            }
+        }
+    }
+    free(entry); free(h);
+    return g;
+}
+
+// Where to stand to fire a line: switches are pressed from their front
+// (right-hand) side; walkovers are crossed, so aim just past the far side.
+static Vector2 SwitchStandPoint(const Sim *sim, int li, bool walk)
+{
+    const Linedef *l = &sim->map->lines[li];
+    Vector2 a = sim->map->verts[l->v1], b = sim->map->verts[l->v2];
+    Vector2 mid = { (a.x + b.x)*0.5f, (a.y + b.y)*0.5f };
+    float dx = b.x - a.x, dy = b.y - a.y, len = sqrtf(dx*dx + dy*dy);
+    if (len < 0.001f) return mid;
+    Vector2 nrm = { dy/len, -dx/len };          // front (right-hand) normal
+    float off = walk ? -(DG_RADIUS + 8.0f) : (DG_RADIUS + 10.0f);
+    return (Vector2){ mid.x + nrm.x*off, mid.y + nrm.y*off };
+}
+
+static bool PlanSwitchHunt(Sim *sim, const char *reason)
+{
+    DoomGuy *dg = &sim->dg;
+    float *g = TriDistField(sim, dg->pos);
+    if (!g) return false;
+    int best = -1;
+    float bestD = FLT_MAX;
+    Vector2 bestP = { 0 };
+    for (int li = 0; li < sim->map->lineCount; li++) {
+        const Linedef *l = &sim->map->lines[li];
+        LineAction act = ActionForSpecial(l->special);
+        if (act.kind == ACT_NONE || act.kind == ACT_EXIT || act.kind == ACT_TELEPORT) continue;
+        if (sim->lineTried[li] || (sim->lineUsed[li] && !act.repeat)) continue;
+        if (l->tag <= 0 && act.kind != ACT_DOOR_OPEN) continue;   // untagged = local door, routing handles it
+        Vector2 p = SwitchStandPoint(sim, li, act.walk && !act.use);
+        int t = TriAtPoint(sim, p.x, p.y);
+        if (t < 0 || g[t] == FLT_MAX) continue;
+        if (g[t] < bestD) { bestD = g[t]; best = li; bestP = p; }
+    }
+    if (StateLogEnabled() && best < 0) {
+        int reach = 0;
+        for (int t = 0; t < sim->triCount; t++) if (g[t] != FLT_MAX) reach++;
+        StateLogBegin("switch_hunt_none");
+        StateLogInt("tic", sim->tic);
+        StateLogInt("reachable_tris", reach);
+        StateLogInt("tris", sim->triCount);
+        StateLogInt("start_tri", TriAtPoint(sim, dg->pos.x, dg->pos.y));
+        StateLogEnd();
+    }
+    free(g);
+    if (best < 0) return false;
+    dg->objective = OBJ_SWITCH;
+    dg->switchLine = best;
+    if (StateLogEnabled()) {
+        StateLogBegin("switch_hunt");
+        StateLogInt("tic", sim->tic);
+        StateLogInt("line", best);
+        StateLogInt("special", sim->map->lines[best].special);
+        StateLogInt("tag", sim->map->lines[best].tag);
+        StateLogFloat("dist", bestD);
+        StateLogEnd();
+    }
+    if (PlanPathToEx(sim, bestP, reason, false)) return true;
+    sim->lineTried[best] = 1;
+    dg->switchLine = -1;
+    dg->objective = OBJ_EXIT;
+    return false;
+}
+
+static bool DgRescueRelocate(Sim *sim)
+{
+    DoomGuy *dg = &sim->dg;
+    if (sim->goalSector < 0 || sim->triCount <= 0) return false;
+    const float *v = sim->lm->floors.vertices;
+    // Nearest triangle centroids first (bounded search radius).
+    int bestT = -1;
+    float bestD = 512.0f;
+    for (int pass = 0; pass < 24; pass++) {
+        int cand = -1;
+        float cd = FLT_MAX;
+        for (int t = 0; t < sim->triCount; t++) {
+            const float *a = &v[(size_t)t*9];
+            Vector2 c = { (a[0] + a[3] + a[6])/3.0f, -(a[2] + a[5] + a[8])/3.0f };
+            float d = Dist2D(c, dg->pos);
+            if (d < cd && d > (pass ? bestD : -1.0f)) { cd = d; cand = t; }
+        }
+        if (cand < 0 || cd > 512.0f) break;
+        bestD = cd;
+        const float *a = &v[(size_t)cand*9];
+        Vector2 c = { (a[0] + a[3] + a[6])/3.0f, -(a[2] + a[5] + a[8])/3.0f };
+        if (sim->tEdgeStart[cand + 1] > sim->tEdgeStart[cand] && RouteExists(sim, c, sim->goal)) {
+            bestT = cand;
+            if (StateLogEnabled()) {
+                StateLogBegin("nav_skip");
+                StateLogInt("tic", sim->tic);
+                StateLogStr("reason", "rescue");
+                StateLogFloat("from_x", dg->pos.x); StateLogFloat("from_y", dg->pos.y);
+                StateLogFloat("to_x", c.x); StateLogFloat("to_y", c.y);
+                StateLogEnd();
+            }
+            Snd(sim, SND_TELEPT, dg->pos);
+            dg->pos = dg->prevPos = c;
+            dg->navSkips++;
+            DgUpdateGround(sim);
+            return true;
+        }
+    }
+    (void)bestT;
+    return false;
+}
+
 static bool PlanCurrentObjective(Sim *sim, const char *reason)
 {
     DoomGuy *dg = &sim->dg;
@@ -2563,7 +2766,19 @@ static bool PlanCurrentObjective(Sim *sim, const char *reason)
     }
     dg->objective = OBJ_EXIT;
     dg->weaponPickup = -1;
+    dg->switchLine = -1;
+    if (sim->goalSector >= 0 && PlanPathToEx(sim, sim->goal, reason, false)) return true;
+    // No walkable route to the exit: something still has to open. Go fire
+    // the nearest reachable switch/walkover he hasn't tried yet.
+    if (PlanSwitchHunt(sim, reason)) return true;
     if (sim->goalSector >= 0 && PlanPathTo(sim, sim->goal, reason)) return true;
+    // Mid-match he must never freeze: if he's on an island of floor the
+    // graph can't route out of (a sliver triangle, an overlapping platform),
+    // relocate him to the nearest floor that can reach the exit.
+    if (sim->tic > 0 && DgRescueRelocate(sim)) {
+        if (PlanPathToEx(sim, sim->goal, "rescued", false)) return true;
+        if (PlanSwitchHunt(sim, "rescued")) return true;
+    }
     DgSetState(sim, DG_NO_GOAL, reason);
     return false;
 }
@@ -2749,13 +2964,80 @@ static void DgUpdateGround(Sim *sim)
 
 // Shared ADVANCE/RETREAT locomotion along the planned waypoints. Handles
 // door waits, arrival (objective-dependent), and stuck replanning.
+// Stuck recovery: step toward the centre of the floor triangle he stands in
+// (always open floor), clearing the corner he was grinding before replanning.
+static void DgUnwedge(Sim *sim)
+{
+    DoomGuy *dg = &sim->dg;
+    int t = TriAtPoint(sim, dg->pos.x, dg->pos.y);
+    if (t < 0) return;
+    const float *v = &sim->lm->floors.vertices[(size_t)t*9];
+    Vector2 c = { (v[0] + v[3] + v[6])/3.0f, -(v[2] + v[5] + v[8])/3.0f };
+    float dx = c.x - dg->pos.x, dy = c.y - dg->pos.y;
+    float d = sqrtf(dx*dx + dy*dy);
+    if (d < 1.0f) return;
+    float step = fminf(d, 12.0f);
+    MoveEntity(sim, &dg->pos, dg->z, DG_RADIUS, (Vector2){ dx/d*step, dy/d*step }, false, -1);
+    DgUpdateGround(sim);
+}
+
 static void DgFollowRoute(Sim *sim)
 {
     DoomGuy *dg = &sim->dg;
     if (dg->wpCursor >= dg->wpCount) {
-        if (!PlanCurrentObjective(sim, "route_exhausted")) return;
+        // Throttle: a failing planner retries once a second, never per tic.
+        if (sim->tic < dg->nextPlanTic) return;
+        if (!PlanCurrentObjective(sim, "route_exhausted") || dg->wpCount <= 0) {
+            dg->nextPlanTic = sim->tic + 35;
+            return;
+        }
+        if (dg->state != DG_ADVANCE && dg->state != DG_RETREAT) return;
     }
     Vector2 target = dg->wp[dg->wpCursor];
+
+    // Progress watchdog: a nav dead-end (an unreachable ledge, a squeeze the
+    // triangle graph thinks is open, a stale fallback route) must never stall
+    // the match. Progress = a new closest approach to the objective point;
+    // replans don't reset it, so plan/arrive/stuck loops are caught too.
+    {
+        Vector2 og = dg->wp[dg->wpCount - 1];
+        if (Dist2D(og, dg->progressGoal) > 64.0f) {
+            dg->progressGoal = og;
+            dg->progressBest = FLT_MAX;
+            dg->noProgressTics = 0;
+        }
+        float d = Dist2D(dg->pos, og);
+        if (d < dg->progressBest - 24.0f) {
+            dg->progressBest = d;
+            dg->noProgressTics = 0;
+        } else if (++dg->noProgressTics >= NAV_WATCHDOG_TICS) {
+            int k = dg->wpCursor;
+            if (Dist2D(dg->pos, dg->wp[k]) < WP_ARRIVE*2.0f && k + 1 < dg->wpCount) k++;
+            Vector2 to = dg->wp[k];
+            dg->noProgressTics = 0;
+            if (SimSectorAtPoint(sim, to.x, to.y) >= 0) {
+                if (StateLogEnabled()) {
+                    StateLogBegin("nav_skip");
+                    StateLogInt("tic", sim->tic);
+                    StateLogFloat("from_x", dg->pos.x); StateLogFloat("from_y", dg->pos.y);
+                    StateLogFloat("to_x", to.x); StateLogFloat("to_y", to.y);
+                    StateLogStr("objective", ObjectiveName(dg->objective));
+                    StateLogEnd();
+                }
+                Snd(sim, SND_TELEPT, dg->pos);
+                Vector2 before = dg->pos;
+                dg->pos = dg->prevPos = to;
+                dg->navSkips++;
+                dg->stuckStrikes = 0;
+                dg->stuckTics = 0;
+                DgRunTriggers(sim, before, to);   // walkovers on the way still fire
+                DgUpdateGround(sim);
+                dg->wpCursor = k + 1;
+                dg->progressBest = Dist2D(dg->pos, og);
+                return;
+            }
+        }
+    }
 
     // Standing on a moving lift: ride it, don't grind against the shaft.
     int onLift = (dg->sector >= 0) ? sim->sectorLift[dg->sector] : -1;
@@ -2816,7 +3098,8 @@ static void DgFollowRoute(Sim *sim)
     bool last = (dg->wpCursor == dg->wpCount - 1);
     // Pickup runs must end ON the item (touch radius 32), not merely near
     // it, or arrival flips the objective while it's still on the floor.
-    float arrive = last ? ((dg->objective != OBJ_EXIT) ? 12.0f : DG_USERANGE*0.75f)
+    float arrive = last ? ((dg->objective == OBJ_SWITCH) ? 20.0f
+                           : (dg->objective != OBJ_EXIT) ? 12.0f : DG_USERANGE*0.75f)
                         : WP_ARRIVE;
     if (Dist2D(dg->pos, target) < arrive) {
         dg->stuckStrikes = 0;
@@ -2824,6 +3107,16 @@ static void DgFollowRoute(Sim *sim)
             if (dg->objective == OBJ_EXIT) {
                 if (sim->exitLine >= 0) DgTriggerExit(sim);
                 else DgSetState(sim, DG_NO_GOAL, "no_exit_line");
+            } else if (dg->objective == OBJ_SWITCH) {
+                int li = dg->switchLine;
+                if (li >= 0) {
+                    sim->lineTried[li] = 1;
+                    RunLineAction(sim, li);   // press it / we just crossed it
+                    if (dg->state == DG_EXITED) return;
+                }
+                dg->switchLine = -1;
+                dg->objective = OBJ_EXIT;
+                PlanCurrentObjective(sim, "switch_fired");
             } else if (dg->objective == OBJ_WEAPON) {
                 // Arrived but never touched it (a ledge perch, say): write
                 // it off so the ladder can't loop on it forever.
@@ -2861,6 +3154,19 @@ static void DgFollowRoute(Sim *sim)
                     StateLogInt("edge", e);
                     StateLogFloat("x", dg->pos.x);
                     StateLogFloat("y", dg->pos.y);
+                    const NavEdge *E = &sim->tEdges[e];
+                    int toSec = sim->lm->floorTriSector[E->to];
+                    StateLogInt("line", E->line);
+                    StateLogInt("door", E->door);
+                    StateLogInt("lift", E->lift);
+                    StateLogInt("from_sector", dg->sector);
+                    StateLogInt("to_sector", toSec);
+                    StateLogFloat("from_floor", dg->sector >= 0 ? SimSectorFloorNow(sim, dg->sector) : 0);
+                    StateLogFloat("to_floor", SimSectorFloorNow(sim, toSec));
+                    StateLogFloat("to_ceil", sim->map->sectors[toSec].ceilH);
+                    if (E->line >= 0) StateLogInt("line_special", sim->map->lines[E->line].special);
+                    StateLogFloat("wp_x", E->wp.x);
+                    StateLogFloat("wp_y", E->wp.y);
                     StateLogEnd();
                 }
             }
@@ -2871,6 +3177,48 @@ static void DgFollowRoute(Sim *sim)
                 dg->objective = OBJ_EXIT;
                 dg->stuckStrikes = 0;
             }
+            if (StateLogEnabled() && dg->stuckStrikes <= 3) {
+                // What is he grinding against? Every blocking line in reach.
+                StateLogBegin("stuck_detail");
+                StateLogInt("tic", sim->tic);
+                StateLogInt("strikes", dg->stuckStrikes);
+                StateLogFloat("x", dg->pos.x);
+                StateLogFloat("y", dg->pos.y);
+                StateLogFloat("z", dg->z);
+                if (dg->wpCursor < dg->wpCount) {
+                    StateLogFloat("wp_x", dg->wp[dg->wpCursor].x);
+                    StateLogFloat("wp_y", dg->wp[dg->wpCursor].y);
+                    StateLogInt("wp_door", dg->wpDoor[dg->wpCursor]);
+                    StateLogInt("wp_lift", dg->wpLift[dg->wpCursor]);
+                }
+                StateLogArrBegin("lines");
+                for (int li = 0; li < sim->map->lineCount; li++) {
+                    const Linedef *l = &sim->map->lines[li];
+                    Vector2 la = sim->map->verts[l->v1], lb = sim->map->verts[l->v2];
+                    if (Dist2D(SegClosest(la, lb, dg->pos), dg->pos) > DG_RADIUS + 6.0f) continue;
+                    StateLogObjBegin(NULL);
+                    StateLogInt("i", li);
+                    StateLogBool("blocks", LineBlocksEnt(sim, l, dg->z, false));
+                    StateLogInt("flags", l->flags);
+                    StateLogInt("special", l->special);
+                    StateLogFloat("x1", la.x); StateLogFloat("y1", la.y);
+                    StateLogFloat("x2", lb.x); StateLogFloat("y2", lb.y);
+                    int fs = l->sideFront >= 0 ? sim->map->sides[l->sideFront].sector : -1;
+                    int bs = l->sideBack >= 0 ? sim->map->sides[l->sideBack].sector : -1;
+                    StateLogInt("fs", fs); StateLogInt("bs", bs);
+                    if (fs >= 0) { StateLogFloat("ff", SimSectorFloorNow(sim, fs)); StateLogFloat("fc", sim->map->sectors[fs].ceilH); }
+                    if (bs >= 0) { StateLogFloat("bf", SimSectorFloorNow(sim, bs)); StateLogFloat("bc", sim->map->sectors[bs].ceilH); }
+                    StateLogObjEnd();
+                }
+                StateLogArrEnd();
+                StateLogEnd();
+            }
+            if (dg->stuckStrikes >= 3 && dg->objective == OBJ_SWITCH && dg->switchLine >= 0) {
+                sim->lineTried[dg->switchLine] = 1;   // can't reach it: next switch
+                dg->switchLine = -1;
+                dg->objective = OBJ_EXIT;
+            }
+            DgUnwedge(sim);
             PlanCurrentObjective(sim, "stuck");
         }
     } else {
@@ -2944,8 +3292,20 @@ static void DgTick(Sim *sim)
     dg->prevPos = dg->pos;
     dg->prevZ = dg->z;
 
-    if (dg->state == DG_EXITED || dg->state == DG_NO_GOAL || dg->state == DG_DEAD)
+    if (dg->state == DG_EXITED || dg->state == DG_DEAD)
         return;
+    // NO_GOAL heartbeat: the world changes (doors, drops); retry every ~5s
+    // instead of standing down forever. (This used to sit below an early
+    // return that also caught NO_GOAL, so it never ran.)
+    if (dg->state == DG_NO_GOAL) {
+        if (sim->tic % 175 == 0 && sim->goalSector >= 0) {
+            dg->objective = OBJ_EXIT;
+            if (PlanCurrentObjective(sim, "no_goal_retry")) {
+                DgSetState(sim, DG_ADVANCE, "route_found");
+            }
+        }
+        return;
+    }
 
     TouchPickups(sim);
     if (dg->state == DG_DEAD) return;   // pickup path can't kill, but be safe
@@ -2970,32 +3330,27 @@ static void DgTick(Sim *sim)
         }
     }
 
-    // NO_GOAL heartbeat: the world changes (doors, drops); retry every ~5s
-    // instead of standing down forever.
-    if (dg->state == DG_NO_GOAL) {
-        if (sim->tic % 175 == 0 && sim->goalSector >= 0) {
-            dg->objective = OBJ_EXIT;
-            if (PlanCurrentObjective(sim, "no_goal_retry")) {
-                DgSetState(sim, DG_ADVANCE, "route_found");
-            }
-        }
-        return;
-    }
-
     // Low health: break off for the nearest health kit, if any exists.
+    // A failed heal plan backs off for 3s (it used to retry — and wipe his
+    // live route — every tic, freezing him in place: the E1M6 stall).
     if (dg->health < DG_LOW_HP && dg->objective != OBJ_HEAL &&
-        dg->state != DG_RETREAT) {
+        dg->state != DG_RETREAT && sim->tic >= dg->healRetryTic) {
         int heal = NearestHealPickup(sim, dg->pos);
-        if (heal >= 0 &&
+        if (heal >= 0 && RouteExists(sim, dg->pos, sim->pickups[heal].pos) &&
             RouteExists(sim, sim->pickups[heal].pos, sim->goal)) {
+            DGObjective prevObj = dg->objective;
             dg->objective = OBJ_HEAL;
             dg->healPickup = heal;
             if (PlanPathTo(sim, sim->pickups[heal].pos, "low_health")) {
                 DgSetState(sim, DG_RETREAT, "low_health");
             } else {
-                dg->objective = OBJ_EXIT;
+                dg->objective = prevObj;
                 dg->healPickup = -1;
+                dg->healRetryTic = sim->tic + 105;
+                PlanCurrentObjective(sim, "heal_unreachable");
             }
+        } else {
+            dg->healRetryTic = sim->tic + 105;
         }
     }
 
@@ -3088,10 +3443,16 @@ static void FindGoal(Sim *sim)
     sim->goalSector = frontSec;
     if (len > 0.001f && frontSec >= 0) {
         Vector2 nrm = { dy/len, -dx/len };
-        Vector2 a = { mid.x + nrm.x*32.0f, mid.y + nrm.y*32.0f };
-        Vector2 b = { mid.x - nrm.x*32.0f, mid.y - nrm.y*32.0f };
-        if (SimSectorAtPoint(sim, a.x, a.y) == frontSec) sim->goal = a;
-        else if (SimSectorAtPoint(sim, b.x, b.y) == frontSec) sim->goal = b;
+        // Probe outward on both sides; overlapping floors (a platform drawn
+        // over its surround) can claim the nearest probes for another sector.
+        static const float OFFS[] = { 32.0f, 24.0f, 40.0f, 16.0f, 48.0f, 56.0f };
+        bool found = false;
+        for (size_t k = 0; k < sizeof(OFFS)/sizeof(OFFS[0]) && !found; k++) {
+            for (int sgn = 1; sgn >= -1 && !found; sgn -= 2) {
+                Vector2 p = { mid.x + nrm.x*OFFS[k]*sgn, mid.y + nrm.y*OFFS[k]*sgn };
+                if (SimSectorAtPoint(sim, p.x, p.y) == frontSec) { sim->goal = p; found = true; }
+            }
+        }
     }
     if (sim->goalSector < 0) {
         sim->goalSector = SimSectorAtPoint(sim, sim->goal.x, sim->goal.y);
@@ -3119,6 +3480,12 @@ static bool SpawnDoomGuy(Sim *sim)
         dg->targetMob = -1;
         dg->healPickup = -1;
         dg->weaponPickup = -1;
+        dg->switchLine = -1;
+        dg->navSkips = 0;
+        dg->progressBest = FLT_MAX;
+        dg->noProgressTics = 0;
+        dg->healRetryTic = 0;
+        dg->nextPlanTic = 0;
         dg->strafeDir = 1.0f;
         dg->objective = OBJ_EXIT;
         dg->sector = SimSectorAtPoint(sim, dg->pos.x, dg->pos.y);
@@ -3291,7 +3658,7 @@ static void SpawnMapThings(Sim *sim)
     for (int i = 0; i < map->thingCount; i++) {
         const Thing *t = &map->things[i];
         if (t->flags & 0x10) continue;
-        if (!(t->flags & 0x02)) continue;   // not present at Hurt-Me-Plenty
+        if (!(t->flags & g_tuning.garrisonSkillBit)) continue;   // skill filter
         if (t->type == 2035 && sim->barrelCount < BARRELS_MAX) {
             bool onMap = false;
             float fh = SimFloorAtPoint(sim, t->x, t->y, &onMap);
@@ -3426,6 +3793,7 @@ void SimFree(Sim *sim)
     free(sim->lifts);
     free(sim->sectorLift);
     free(sim->lineUsed);
+    free(sim->lineTried);
     free(sim->dg.wp);
     free(sim->dg.wpFloor);
     free(sim->dg.wpDoor);
@@ -3441,7 +3809,8 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
     RndInit(sim);
 
     sim->lineUsed = (unsigned char *)calloc((size_t)map->lineCount, 1);
-    if (!sim->lineUsed || !BuildDoors(sim) || !BuildLifts(sim)) {
+    sim->lineTried = (unsigned char *)calloc((size_t)map->lineCount, 1);
+    if (!sim->lineUsed || !sim->lineTried || !BuildDoors(sim) || !BuildLifts(sim)) {
         TraceLog(LOG_ERROR, "SIM: out of memory building sim");
         SimFree(sim);
         return false;

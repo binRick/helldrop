@@ -9,3 +9,4 @@ helldrop.sav
 assets/*.wad
 assets/*.WAD
 tools/mkwad
+build/
