@@ -29,11 +29,12 @@ typedef struct GameModels {
     GameModel barrel;
     GameModel pickup[PK_COUNT];
     Shader shader;
-    int locSkinned, locLightDir, locBones, locAmbient, locRim;
+    int locSkinned, locLightDir, locBones, locAmbient, locRim, locSil;
     RenderTexture2D portrait[MK_COUNT];   // idle-pose thumbnails for the HUD
     bool hasPortrait[MK_COUNT];
     bool any;
     bool enabled;              // M toggles models <-> authentic sprites
+    bool cpuSkin;              // HELLDROP_CPU_SKIN=1: raylib CPU skinning fallback
 } GameModels;
 
 bool GameModelsLoad(GameModels *gm, const char *dir);
@@ -45,6 +46,11 @@ void GameModelsRenderPortraits(GameModels *gm);
 void GameModelDraw(const GameModels *gm, const GameModel *m, Vector3 feet,
                    float yawDeg, ModelClip clip, float clipTime, bool loop,
                    Color tint, float light);
+// silhouette.a > 0 first draws an x-ray pass (depth test off) in that flat
+// colour, so entities stay readable behind iso walls.
+void GameModelDrawEx(const GameModels *gm, const GameModel *m, Vector3 feet,
+                     float yawDeg, ModelClip clip, float clipTime, bool loop,
+                     Color tint, float light, Color silhouette);
 
 // Sim state -> clip choice for monsters and the marine (render-only).
 void MobModelPose(const Mob *mob, int idx, long tic, float alpha,

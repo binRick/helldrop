@@ -143,6 +143,7 @@ assets/freedoom2.wad:
 # The shippable helldrop.wad is baked into the .data via --preload-file, so
 # the browser build is self-contained (Freedoom-based, legal to ship).
 WEBDIR       = dist-web
+MODEL_GLBS   = $(wildcard assets/models/*.glb)
 RAYLIB_WEB_A = $(RAYLIB_SRC)/src/libraylib.web.a
 WEBSHELL     = web/shell.html
 
@@ -163,6 +164,7 @@ WEBLDFLAGS = -s USE_GLFW=3 \
              -s STACK_SIZE=1048576 \
              -s ASYNCIFY \
              --preload-file $(HELLDROP_WAD)@assets/helldrop.wad \
+             $(if $(MODEL_GLBS),--preload-file assets/models@assets/models) \
              --shell-file $(WEBSHELL)
 
 web: $(WEBDIR)/index.html
@@ -179,7 +181,7 @@ $(RAYLIB_WEB_A): | $(RAYLIB_SRC)
 
 web-raylib: $(RAYLIB_WEB_A)
 
-$(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(HELLDROP_WAD) | $(WEBDIR)
+$(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(HELLDROP_WAD) $(MODEL_GLBS) | $(WEBDIR)
 	@command -v emcc >/dev/null || { echo "error: emcc not on PATH — activate emscripten (emsdk_env.sh)"; exit 1; }
 	emcc $(SRC) $(RAYLIB_WEB_A) $(WEBCFLAGS) $(WEBLDFLAGS) -o $@
 

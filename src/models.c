@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "raymath.h"
@@ -48,8 +49,10 @@ static const char *MODEL_FS = GLSL_HEAD
     "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
     "uniform vec3 lightDir; uniform float ambient; uniform vec3 rimColor;\n"
     "uniform int lightCount; uniform vec4 lightPos[24]; uniform vec3 lightCol[24];\n"
+    "uniform vec4 silhouette;\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
+    "    if (silhouette.a > 0.0) { finalColor = silhouette; return; }\n"
     "    vec4 albedo = texture(texture0, fragTexCoord)*colDiffuse;\n"
     "    vec3 n = normalize(fragNormal);\n"
     "    float key = max(dot(n, -lightDir), 0.0);\n"
@@ -63,7 +66,9 @@ static const char *MODEL_FS = GLSL_HEAD
     "        dyn += lightCol[i]*f*f*max(dot(n, normalize(d)), 0.2);\n"
     "    }\n"
     "    vec3 c = albedo.rgb*(ambient + key*0.95 + fill + dyn) + rimColor*rim*0.35;\n"
-    "    finalColor = vec4(c, albedo.a);\n"
+    // Opaque models: baked PNGs may carry junk alpha (0 made the agent's\n"
+    "    // skinned models invisible); only the tint's alpha (spectre) counts.\n"
+    "    finalColor = vec4(c, colDiffuse.a);\n"
     "}\n";
 
 static const char *MOB_FILES[MK_COUNT] = {
@@ -142,15 +147,25 @@ bool GameModelsLoad(GameModels *gm, const char *dir)
     if (!DirectoryExists(dir)) return false;
     gm->shader = LoadShaderFromMemory(MODEL_VS, MODEL_FS);
     if (gm->shader.id == 0) return false;
-    gm->shader.locs[SHADER_LOC_VERTEX_BONEIDS] = GetShaderLocationAttrib(gm->shader, "vertexBoneIndices");
-    gm->shader.locs[SHADER_LOC_VERTEX_BONEWEIGHTS] = GetShaderLocationAttrib(gm->shader, "vertexBoneWeights");
-    gm->shader.locs[SHADER_LOC_MATRIX_BONETRANSFORMS] = GetShaderLocation(gm->shader, "boneMatrices");
+    gm->cpuSkin = getenv("HELLDROP_CPU_SKIN") != NULL;
+    if (gm->cpuSkin) {
+        // Fallback: raylib's CPU skinning (rewrites the vertex buffer per
+        // draw). GPU skinning is the default: same pixels, far cheaper.
+        gm->shader.locs[SHADER_LOC_VERTEX_BONEIDS] = -1;
+        gm->shader.locs[SHADER_LOC_VERTEX_BONEWEIGHTS] = -1;
+        gm->shader.locs[SHADER_LOC_MATRIX_BONETRANSFORMS] = -1;
+    } else {
+        gm->shader.locs[SHADER_LOC_VERTEX_BONEIDS] = GetShaderLocationAttrib(gm->shader, "vertexBoneIndices");
+        gm->shader.locs[SHADER_LOC_VERTEX_BONEWEIGHTS] = GetShaderLocationAttrib(gm->shader, "vertexBoneWeights");
+        gm->shader.locs[SHADER_LOC_MATRIX_BONETRANSFORMS] = GetShaderLocation(gm->shader, "boneMatrices");
+    }
     gm->shader.locs[SHADER_LOC_MATRIX_NORMAL] = GetShaderLocation(gm->shader, "matNormal");
     gm->shader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(gm->shader, "matModel");
     gm->locSkinned = GetShaderLocation(gm->shader, "skinned");
     gm->locLightDir = GetShaderLocation(gm->shader, "lightDir");
     gm->locAmbient = GetShaderLocation(gm->shader, "ambient");
     gm->locRim = GetShaderLocation(gm->shader, "rimColor");
+    gm->locSil = GetShaderLocation(gm->shader, "silhouette");
     Vector3 ld = Vector3Normalize((Vector3){ 0.45f, -0.8f, -0.35f });
     SetShaderValue(gm->shader, gm->locLightDir, &ld, SHADER_UNIFORM_VEC3);
     Vector3 rim = { 1.0f, 0.55f, 0.35f };
@@ -200,6 +215,13 @@ void GameModelDraw(const GameModels *gm, const GameModel *m, Vector3 feet,
                    float yawDeg, ModelClip clip, float clipTime, bool loop,
                    Color tint, float light)
 {
+    GameModelDrawEx(gm, m, feet, yawDeg, clip, clipTime, loop, tint, light, (Color){ 0 });
+}
+
+void GameModelDrawEx(const GameModels *gm, const GameModel *m, Vector3 feet,
+                     float yawDeg, ModelClip clip, float clipTime, bool loop,
+                     Color tint, float light, Color silhouette)
+{
     if (!m->loaded) return;
     int skinned = 0;
     if (m->skinned) {
@@ -212,8 +234,8 @@ void GameModelDraw(const GameModels *gm, const GameModel *m, Vector3 feet,
             if (loop && a->keyframeCount > 1) f = fmodf(f, last);
             else if (f > last) f = last;
             if (f < 0.0f) f = 0.0f;
-            UpdateModelAnimationBones(m->model, *a, f);
-            skinned = 1;
+            if (gm->cpuSkin) UpdateModelAnimation(m->model, *a, f);
+            else { UpdateModelAnimationBones(m->model, *a, f); skinned = 1; }
         }
     }
     SetShaderValue(gm->shader, gm->locSkinned, &skinned, SHADER_UNIFORM_INT);
@@ -223,6 +245,20 @@ void GameModelDraw(const GameModels *gm, const GameModel *m, Vector3 feet,
     float s = m->scale;
     // Doom angle θ (CCW from east) faces world (cos θ, 0, -sin θ); the
     // model faces +Z, so it turns θ + 90° about Y.
+    if (silhouette.a > 0) {
+        Vector4 sc = ColorNormalize(silhouette);
+        SetShaderValue(gm->shader, gm->locSil, &sc, SHADER_UNIFORM_VEC4);
+        rlDrawRenderBatchActive();
+        rlDisableDepthTest();
+        rlDisableDepthMask();
+        DrawModelEx(m->model, pos, (Vector3){ 0, 1, 0 }, yawDeg + 90.0f,
+                    (Vector3){ s, s, s }, WHITE);
+        rlDrawRenderBatchActive();
+        rlEnableDepthMask();
+        rlEnableDepthTest();
+        Vector4 off = { 0, 0, 0, 0 };
+        SetShaderValue(gm->shader, gm->locSil, &off, SHADER_UNIFORM_VEC4);
+    }
     DrawModelEx(m->model, pos, (Vector3){ 0, 1, 0 }, yawDeg + 90.0f,
                 (Vector3){ s, s, s }, tint);
 }

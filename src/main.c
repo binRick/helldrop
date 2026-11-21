@@ -49,6 +49,7 @@ typedef struct Options {
     const char *dumpDir;   // --dump-frames <dir>: PNG per frame (media capture)
     long dumpEvery;        // --dump-every <N>: dump cadence in frames
     long simOnly;          // --simonly <tics>: headless match, prints outcome JSON
+    bool viewer;           // --viewer: model gallery (dev mode), screenshot with --selftest
     int garrisonSkill;     // --garrison-skill <1|2|4>: map-thing skill bit (balance)
     int garrisonDmg;       // --garrison-dmg <pct>: native monster damage (balance)
 } Options;
@@ -160,6 +161,20 @@ static void UpdateDynamicLights(const Sim *sim, float alpha)
 static float mobYaw[MOBS_MAX];
 static bool mobYawInit[MOBS_MAX];
 static float dgYaw;
+// Cull: skinning ~130 monsters twice a frame (iso view + doomcam) was the
+// models' whole CPU cost; most of them are off-screen.
+static int gViewW, gViewH;   // target size of the DrawWorld pass in flight
+static bool InView(Camera3D cam, Vector3 p, float margin)
+{
+    if (cam.projection == CAMERA_PERSPECTIVE) {
+        Vector3 f = Vector3Subtract(cam.target, cam.position);
+        Vector3 d = Vector3Subtract(p, cam.position);
+        if (Vector3DotProduct(f, d) <= 0.0f) return false;
+        if (Vector3Length(d) > 2200.0f) return false;
+    }
+    Vector2 s = GetWorldToScreenEx(p, cam, gViewW, gViewH);
+    return s.x > -margin && s.y > -margin && s.x < gViewW + margin && s.y < gViewH + margin;
+}
 
 static float SmoothYaw(float *cur, bool *init, float target)
 {
@@ -208,6 +223,7 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     opt->dumpDir = NULL;
     opt->dumpEvery = 1;
     opt->simOnly = 0;
+    opt->viewer = false;
     opt->garrisonSkill = -1;
     opt->garrisonDmg = -1;
 
@@ -245,6 +261,8 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
         } else if (strcmp(argv[i], "--garrison-dmg") == 0 && i + 1 < argc) {
             opt->garrisonDmg = atoi(argv[++i]);
             if (opt->garrisonDmg < 1 || opt->garrisonDmg > 400) return false;
+        } else if (strcmp(argv[i], "--viewer") == 0) {
+            opt->viewer = true;
         } else if (strcmp(argv[i], "--bg") == 0 || strcmp(argv[i], "--show") == 0) {
             // handled by kit_window_flags (hidden, unfocused, silent test runs)
         } else if (strcmp(argv[i], "--dump-every") == 0 && i + 1 < argc) {
@@ -438,8 +456,9 @@ static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
         static bool dgInit;
         if (sim->tic < 2) dgInit = false;
         float yaw = SmoothYaw(&dgYaw, &dgInit, sim->dg.angleDeg);
-        GameModelDraw(&gmodels, &gmodels.marine, p, yaw, clip, ct, loop,
-                      WHITE, SectorLight01(sim, sim->dg.sector));
+        GameModelDrawEx(&gmodels, &gmodels.marine, p, yaw, clip, ct, loop,
+                        WHITE, SectorLight01(sim, sim->dg.sector),
+                        (Color){ 90, 255, 120, 110 });
         return;
     }
     const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, &sim->dg, sim->tic) : NULL;
@@ -540,6 +559,7 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
             }
         }
         const GameModel *gmdl = gmodels.enabled ? &gmodels.mob[m->kind] : NULL;
+        if (gmdl && gmdl->loaded && !InView(cam, (Vector3){ p.x, p.y + 28.0f, p.z }, 120.0f)) continue;
         if (gmdl && gmdl->loaded) {
             ModelClip clip; float ct; bool loop;
             MobModelPose(m, i, sim->tic, alpha, &clip, &ct, &loop);
@@ -547,8 +567,12 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
             if (m->kind == MK_SPECTRE) tint = (Color){ 40, 40, 58, 255 };
             if (m->state == MOB_PAIN && ((sim->tic/2) & 1)) tint = (Color){ 255, 200, 200, 255 };
             float yaw = (m->state == MOB_DEAD) ? mobYaw[i] : SmoothYaw(&mobYaw[i], &mobYawInit[i], m->angleDeg);
-            GameModelDraw(&gmodels, gmdl, p, yaw, clip, ct, loop, tint,
-                          SectorLight01(sim, m->sector));
+            // Live demons x-ray through iso walls (iso view only; the
+            // doomcam is his eyes, he can't see through walls).
+            Color sil = (m->state != MOB_DEAD && cam.projection == CAMERA_ORTHOGRAPHIC && m->kind != MK_SPECTRE)
+                            ? (Color){ 230, 60, 40, 70 } : (Color){ 0 };
+            GameModelDrawEx(&gmodels, gmdl, p, yaw, clip, ct, loop, tint,
+                            SectorLight01(sim, m->sector), sil);
         } else if (f0(gs, m, sim->tic)) {
             const SpriteFrame *f = f0(gs, m, sim->tic);
             // Spectres render as a dark ghost of the pinky sprite.
@@ -1052,6 +1076,8 @@ static void SetupView(ViewState *vs, const DoomMap *map)
     // Start on the marine, close enough to read the fight; R shows the map.
     vs->follow = true;
     vs->fovy = FOVY_MIN > FOLLOW_FOVY ? FOVY_MIN : FOLLOW_FOVY;
+    const char *fz = getenv("HELLDROP_FOVY");   // test captures: zoom override
+    if (fz && atof(fz) > 0) vs->fovy = Clamp((float)atof(fz), FOVY_MIN, FOVY_MAX);
     float diag = sqrtf(extentX*extentX + extentY*extentY);
     rlSetClipPlanes(1.0, CAM_DIST + 2.0*diag);
 }
@@ -1955,6 +1981,46 @@ int main(int argc, char **argv)
             TraceLog(LOG_INFO, "MAIN: 3D models loaded (M toggles sprites)");
         }
     }
+    if (opt.viewer) {
+        // Dev mode: every model on a floor under the iso camera, cycling
+        // clips (idle/walk/attack/pain/death per row), depth-tested against
+        // a real floor. --selftest --exit-after N screenshots it.
+        const char *CLIPN[CLIP_COUNT] = { "idle", "walk", "attack", "pain", "death" };
+        for (long f = 0; !WindowShouldClose(); f++) {
+            float t = (float)f/60.0f;
+            Camera3D c = { 0 };
+            c.target = (Vector3){ 300, 0, -200 };
+            c.position = Vector3Add(c.target, (Vector3){ 2000*cosf(50*DEG2RAD)*sinf(45*DEG2RAD), 2000*sinf(50*DEG2RAD), 2000*cosf(50*DEG2RAD)*cosf(45*DEG2RAD) });
+            c.up = (Vector3){ 0, 1, 0 }; c.fovy = 700; c.projection = CAMERA_ORTHOGRAPHIC;
+            int clip = (int)(t/2.0f) % CLIP_COUNT;
+            BeginDrawing();
+            ClearBackground((Color){ 20, 20, 24, 255 });
+            BeginMode3D(c);
+            DrawPlane((Vector3){ 300, 0, -200 }, (Vector2){ 1400, 1000 }, (Color){ 70, 68, 64, 255 });
+            DrawGrid(28, 50.0f);
+            int n = 0;
+            for (int k = 0; k < MK_COUNT; k++) {
+                if (k == MK_SPECTRE || !gmodels.mob[k].loaded) continue;
+                Vector3 p = { (float)(n % 5)*140.0f, 0, -(float)(n/5)*140.0f };
+                GameModelDraw(&gmodels, &gmodels.mob[k], p, 270.0f + 30.0f, (ModelClip)clip, fmodf(t, 2.0f),
+                              clip < 2, WHITE, 0.9f);
+                n++;
+            }
+            if (gmodels.marine.loaded)
+                GameModelDraw(&gmodels, &gmodels.marine, (Vector3){ 700, 0, 0 }, 300.0f, (ModelClip)clip,
+                              fmodf(t, 2.0f), clip < 2, WHITE, 0.9f);
+            EndMode3D();
+            DrawText(TextFormat("--viewer  clip: %s", CLIPN[clip]), 12, 12, 24, RAYWHITE);
+            EndDrawing();
+            if (opt.selftest && f >= ((opt.exitAfter > 0) ? opt.exitAfter : 60)) {
+                TakeScreenshot("selftest.png");
+                break;
+            }
+        }
+        GameModelsUnload(&gmodels);
+        CloseWindow();
+        return 0;
+    }
     InitAudioDevice();
     GameAudioLoad(&gaudio, &wad);
     kit_background_apply();
@@ -2211,12 +2277,14 @@ static bool HelldropFrame(void)
             Camera3D fp = DoomcamFrom(&sim, simAlpha);
             BeginTextureMode(doomcamRT);
             ClearBackground((Color){ 10, 10, 12, 255 });
+            gViewW = 320; gViewH = 200;
             DrawWorld(&sim, &lm, &map, thingHeights, &gsprites, fp, simAlpha, false);
             EndTextureMode();
         }
 
         BeginDrawing();
         ClearBackground((Color){ 12, 12, 14, 255 });
+        gViewW = GetScreenWidth(); gViewH = GetScreenHeight();
         DrawWorld(&sim, &lm, &map, thingHeights, &gsprites, cam, simAlpha, true);
         BeginMode3D(cam);
         DrawRoute(&sim, simAlpha);

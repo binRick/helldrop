@@ -7,7 +7,7 @@ Full design rationale and roadmap: `DESIGN.md`.
 ## Build & run
 
 - `./run.sh` — incremental build (make) + launch, attached to the terminal.
-  First run clones/builds static **raylib 6.0** into `vendor/` and downloads
+  First run clones/builds static **raylib 6.2** into `vendor/` and downloads
   `assets/freedoom1.wad` (BSD-licensed IWAD). No Homebrew deps.
 - raylib is pinned via `RAYLIB_TAG` in the Makefile; upgrade = bump tag +
   `rm -rf vendor/raylib-src`.
@@ -55,11 +55,23 @@ Full design rationale and roadmap: `DESIGN.md`.
   in a secret sector (special 9) on E1M3 routes through E1M9. `--map` pins
   a single level with everything unlocked — use it for ALL testing, since
   campaign mode reads the save file (baselines: `--map E1M1`).
+- **`make test`** — the headless gameplay regression matrix
+  (`tools/playtest.sh`): every E1 map unaided and with `--autodrop` via
+  `--simonly`, ~25 s total. Contract: every match ends, scripted drops kill
+  him on every map, he exits unaided on >= 6/9. Run it after ANY sim, nav or
+  balance change. Test runs execute a copy outside the .app bundle
+  (`build/helldrop-test`): a bundled binary registers as a Dock app per launch.
+- Test launches are hidden (`kit_background.h`): `--selftest`, `--exit-after`,
+  `--dump-frames` and `--simonly` imply `--bg` (no window, focus, Dock tile or
+  sound); `--show` overrides. Never launch a visible window to test.
 - Binary: `Helldrop.app/Contents/MacOS/helldrop`. Flags: `--wad <path>`,
   `--map E1M2`, `--no-log`, `--exit-after <frames>`, `--turbo <N>` (sim speed
   multiplier, great for fast AI testing), `--autodrop` (scripted monster
   waves dropped on his route every 250 tics — the combat/balance smoke test;
-  expected outcomes: unaided run -> he exits, autodrop run -> he dies).
+  expected outcomes: unaided run -> he exits, autodrop run -> he dies),
+  `--simonly <tics>` (play the match headless as fast as the CPU allows and
+  print one JSON outcome line — the balance harness), `--garrison-skill
+  <1|2|4>` / `--garrison-dmg <pct>` (override the map-population tuning).
 - `--selftest` — loads the map, renders 60 frames, writes `selftest.png`,
   exits 0. Combine with `--turbo 8` to screenshot mid-simulation. Use this
   (then Read the png) to verify changes without user interaction.
@@ -84,7 +96,10 @@ Full design rationale and roadmap: `DESIGN.md`.
   pass with a perspective camera); on his death it takes the screen,
   drops to the floor, and fades red before the intermission. Match end shows the
   intermission report card (vanilla E1 PAR times in `ParSeconds`).
-  `--selftest` screenshots at frame 60, or at `--exit-after N` when given. **Hell's Hand** (each on a 12s
+  `--selftest` screenshots at frame 60, or at `--exit-after N` when given.
+  Camera follows him by default (SPACE re-follows after any pan; R = whole
+  map). F1 = developer overlay (the old always-on debug text). M toggles the
+  3D models <-> authentic WAD sprites. A how-to card opens each match. **Hell's Hand** (each on a 12s
   cooldown): F slams/holds the door — or recalls the lift — nearest the
   cursor (15/20 souls); V detonates the nearest barrel (30 souls; barrels
   are live entities, shootable, chain-reacting). Drops cost souls (the Pain Tithe:
@@ -145,8 +160,10 @@ change** (`statelog.h` has the writer API).
   of sight breaks before it lands. Sight and
   hitscan are height-aware: `SightT` interpolates the ray's z through every
   crossed line's vertical opening, so ledge steps and half-open doors block
-  shots like real walls. Map things spawn at the Hurt-Me-Plenty skill
-  filter (0x02) — that's the tuned baseline. Doom Guy unaided should
+  shots like real walls. Map things spawn at the EASY skill filter
+  (0x01) and the native garrison deals 45% damage (`SimTuning`, tuned with
+  `--simonly`); player-dropped demons always hit at full strength. At the old
+  HMP/100% baseline he died unaided on 7/8 maps — the player won by watching. Doom Guy unaided should
   usually clear the map population and exit; player drops are what kill
   him. His targeting is the **threat ledger** (`DgThreatScore`): class
   weights (arch-vile 4x), time-to-melee for melee-only kinds, charging
@@ -155,6 +172,28 @@ change** (`statelog.h` has the writer API).
   an engage threshold lets him walk past far stragglers. Balance knobs
   live in `MOB_INFO`, `CLASS_W`, the monster whiff curve in `MobAttack`,
   and his cadence in `DgFire`.
+- **Nav robustness** (all in sim.c, all logged): radius-aware shortcut
+  pruning; `OBJ_SWITCH` switch hunting when the exit is unreachable (one
+  Dijkstra field picks the nearest reachable unused switch/walkover);
+  stair builders (7/8/100/127) as chains of riser lifts; a progress
+  watchdog (`nav_skip`) that blinks him past a dead-end after 12 s with no
+  new closest approach; a mid-match rescue that relocates him off
+  graph islands. `sim_init` logs `unhandled_specials`; `switch_hunt_none`
+  logs the `fence` lines around his reachable region — read those first
+  when a map's progression dead-ends. `TriAtPoint` uses a uniform grid
+  (build with `-DTRI_GRID_CHECK` to verify it against the linear scan).
+- `src/wadtex.c` — wall textures (PNAMES + TEXTURE1/2 composites) and
+  flats, decoded via PLAYPAL. levelmesh.c groups render geometry per
+  texture (Doom pegging/offsets, sector-light vertex tint, wall-base
+  contact shadow, animated flats); the untextured `floors` mesh remains
+  for the sim and mouse picking.
+- `src/models.c` — GPU-skinned GLB renderer for the Blender-built models
+  in `assets/models/` (built by `tools/models/`): clips idle/walk/attack/
+  pain/death chosen from sim state, key + rim light, HUD portraits. Every
+  model is optional — missing ones fall back to the WAD sprite.
+  `HELLDROP_MODEL_DIR` overrides the directory.
+- Dynamic point lights (main.c `UpdateDynamicLights`): blasts, missiles,
+  arch-vile fire and muzzle flashes light the level and the models.
 - `src/doomgfx.c` — Doom picture-format (patch) decoder via PLAYPAL: the
   classic status bar (STBAR), mugshot faces (STFST/STFOUCH/STFEVL/STFDEAD),
   and big red digits (STTNUM). Every lump is optional with text fallbacks,
