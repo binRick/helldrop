@@ -124,7 +124,8 @@ static bool LoadOne(GameModels *gm, GameModel *out, const char *dir, const char 
         Texture2D *t = &out->model.materials[i].maps[MATERIAL_MAP_DIFFUSE].texture;
         if (t->id > 1 && t->mipmaps <= 1) {
             GenTextureMipmaps(t);
-            SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR);
+            if (t->mipmaps > 1) SetTextureFilter(*t, TEXTURE_FILTER_TRILINEAR);
+            else SetTextureFilter(*t, TEXTURE_FILTER_BILINEAR);
         }
     }
     out->skinned = out->model.skeleton.boneCount > 0 && out->model.boneMatrices != NULL;
@@ -148,6 +149,11 @@ bool GameModelsLoad(GameModels *gm, const char *dir)
     gm->shader = LoadShaderFromMemory(MODEL_VS, MODEL_FS);
     if (gm->shader.id == 0) return false;
     gm->cpuSkin = getenv("HELLDROP_CPU_SKIN") != NULL;
+#ifdef PLATFORM_WEB
+    // WebGL 2: GPU skinning produced stretched "spike" vertices in Chrome;
+    // CPU skinning renders correctly and culling keeps it cheap.
+    gm->cpuSkin = true;
+#endif
     if (gm->cpuSkin) {
         // Fallback: raylib's CPU skinning (rewrites the vertex buffer per
         // draw). GPU skinning is the default: same pixels, far cheaper.
