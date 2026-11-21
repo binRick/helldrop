@@ -196,4 +196,8 @@ clean:
 distclean: clean
 	rm -rf vendor assets/freedoom1.wad $(HELLDROP_WAD)
 
-.PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean
+# Headless gameplay regression matrix (all E1 maps, unaided + scripted drops).
+test: game
+	./tools/playtest.sh
+
+.PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean test

@@ -48,5 +48,7 @@ typedef struct LevelMesh {
 bool LevelMeshBuild(LevelMesh *lm, const DoomMap *map, const Wad *wad);
 void LevelMeshFree(LevelMesh *lm);
 void LevelMeshDraw(const LevelMesh *lm);
+// Use a custom shader (dynamic lights) for the textured render path.
+void LevelMeshSetShader(LevelMesh *lm, Shader sh);
 
 #endif

@@ -4,6 +4,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef TRI_GRID_CHECK
+#include <stdio.h>
+#endif
 
 #include "statelog.h"
 
@@ -185,6 +188,11 @@ static bool PtInTri2D(float px, float pz,
                       float ax, float az, float bx, float bz, float cx, float cz)
 {
     const float EPS = 0.5f;
+    // Zero-area slivers (collinear vertices) make every sign test ~0, which
+    // read as "inside" for any point on their infinite line: a sliver at
+    // x=784 on E1M1 claimed points 1000 units away. They contain nothing.
+    float area2 = (bx - ax)*(cz - az) - (cx - ax)*(bz - az);
+    if (fabsf(area2) < 1.0f) return false;
     float d1 = (px - bx)*(az - bz) - (ax - bx)*(pz - bz);
     float d2 = (px - cx)*(bz - cz) - (bx - cx)*(pz - cz);
     float d3 = (px - ax)*(cz - az) - (cx - ax)*(pz - az);
@@ -227,6 +235,63 @@ static void RndInit(Sim *sim)
 // ---------------------------------------------------------------- sectors
 
 // Floor triangle containing (x, y); overlapping floors pick the highest.
+// Uniform grid over floor triangles: the sim asks "which triangle?" for
+// every entity every tic, and the old linear scan over all triangles was
+// the top CPU hotspot. Candidates stay in ascending index order, so the
+// answer (highest floor wins, first index on ties) is unchanged.
+#define TRI_GRID_CELL 128.0f
+
+static void BuildTriGrid(Sim *sim)
+{
+    const Mesh *m = &sim->lm->floors;
+    const float *v = m->vertices;
+    if (!v || m->triangleCount <= 0) return;
+    float minX = FLT_MAX, minY = FLT_MAX, maxX = -FLT_MAX, maxY = -FLT_MAX;
+    for (int i = 0; i < m->vertexCount; i++) {
+        float x = v[i*3], y = -v[i*3 + 2];
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+    }
+    sim->tgOrgX = minX; sim->tgOrgY = minY;
+    sim->tgW = (int)((maxX - minX)/TRI_GRID_CELL) + 1;
+    sim->tgH = (int)((maxY - minY)/TRI_GRID_CELL) + 1;
+    int cells = sim->tgW*sim->tgH;
+    sim->tgStart = (int *)calloc((size_t)cells + 1, sizeof(int));
+    if (!sim->tgStart) return;
+    for (int pass = 0; pass < 2; pass++) {
+        int *fill = NULL;
+        if (pass == 1) {
+            for (int c = 0; c < cells; c++) sim->tgStart[c + 1] += sim->tgStart[c];
+            sim->tgTris = (int *)malloc((size_t)(sim->tgStart[cells] + 1)*sizeof(int));
+            fill = (int *)malloc((size_t)cells*sizeof(int));
+            if (!sim->tgTris || !fill) {
+                free(fill); free(sim->tgTris); free(sim->tgStart);
+                sim->tgTris = NULL; sim->tgStart = NULL;
+                return;
+            }
+            memcpy(fill, sim->tgStart, (size_t)cells*sizeof(int));
+        }
+        for (int t = 0; t < m->triangleCount; t++) {
+            const float *a = &v[(size_t)t*9];
+            float tx0 = fminf(a[0], fminf(a[3], a[6])), tx1 = fmaxf(a[0], fmaxf(a[3], a[6]));
+            float ty0 = fminf(-a[2], fminf(-a[5], -a[8])), ty1 = fmaxf(-a[2], fmaxf(-a[5], -a[8]));
+            int x0 = (int)((tx0 - minX)/TRI_GRID_CELL), x1 = (int)((tx1 - minX)/TRI_GRID_CELL);
+            int y0 = (int)((ty0 - minY)/TRI_GRID_CELL), y1 = (int)((ty1 - minY)/TRI_GRID_CELL);
+            if (x1 >= sim->tgW) x1 = sim->tgW - 1;
+            if (y1 >= sim->tgH) y1 = sim->tgH - 1;
+            for (int cy = y0; cy <= y1; cy++)
+                for (int cx = x0; cx <= x1; cx++) {
+                    int c = cy*sim->tgW + cx;
+                    if (pass == 0) sim->tgStart[c + 1]++;
+                    else sim->tgTris[fill[c]++] = t;
+                }
+        }
+        free(fill);
+    }
+}
+
 static int TriAtPoint(const Sim *sim, float x, float y)
 {
     const Mesh *m = &sim->lm->floors;
@@ -235,6 +300,35 @@ static int TriAtPoint(const Sim *sim, float x, float y)
     float pz = -y;
     int best = -1;
     float bestH = -FLT_MAX;
+    if (sim->tgStart) {
+        int cx = (int)floorf((x - sim->tgOrgX)/TRI_GRID_CELL);
+        int cy = (int)floorf((y - sim->tgOrgY)/TRI_GRID_CELL);
+        if (cx < 0 || cy < 0 || cx >= sim->tgW || cy >= sim->tgH) return -1;
+        int c = cy*sim->tgW + cx;
+        for (int k = sim->tgStart[c]; k < sim->tgStart[c + 1]; k++) {
+            int t = sim->tgTris[k];
+            const float *a = &v[(size_t)t*9], *b = a + 3, *cc = a + 6;
+            if (!PtInTri2D(x, pz, a[0], a[2], b[0], b[2], cc[0], cc[2])) continue;
+            if (a[1] > bestH) { bestH = a[1]; best = t; }
+        }
+#ifdef TRI_GRID_CHECK
+        {
+            int lin = -1; float lh = -FLT_MAX;
+            for (int t = 0; t < m->triangleCount; t++) {
+                const float *a = &v[(size_t)t*9], *b = a + 3, *c2 = a + 6;
+                if (!PtInTri2D(x, pz, a[0], a[2], b[0], b[2], c2[0], c2[2])) continue;
+                if (a[1] > lh) { lh = a[1]; lin = t; }
+            }
+            if (lin != best) {
+                const float *a = &v[(size_t)lin*9];
+                fprintf(stderr, "TRIGRID MISMATCH (%.3f,%.3f) grid=%d lin=%d linTri=(%.1f,%.1f)(%.1f,%.1f)(%.1f,%.1f) h=%.1f gridH=%.1f cell=%d,%d org=%.1f,%.1f\n",
+                        x, y, best, lin, a[0], -a[2], a[3], -a[5], a[6], -a[8], a[1], best >= 0 ? v[(size_t)best*9 + 1] : -1.0f,
+                        (int)floorf((x - sim->tgOrgX)/TRI_GRID_CELL), (int)floorf((y - sim->tgOrgY)/TRI_GRID_CELL), sim->tgOrgX, sim->tgOrgY);
+            }
+        }
+#endif
+        return best;
+    }
     for (int t = 0; t < m->triangleCount; t++) {
         const float *a = &v[(size_t)t*9], *b = a + 3, *c = a + 6;
         if (!PtInTri2D(x, pz, a[0], a[2], b[0], b[2], c[0], c[2])) continue;
@@ -3872,6 +3966,8 @@ VerbResult SimDetonateBarrel(Sim *sim, float x, float y)
 void SimFree(Sim *sim)
 {
     if (!sim) return;
+    free(sim->tgStart);
+    free(sim->tgTris);
     free(sim->tEdges);
     free(sim->tEdgeStart);
     free(sim->edges);
@@ -3898,6 +3994,7 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
     sim->map = map;
     sim->lm = lm;
     RndInit(sim);
+    BuildTriGrid(sim);
 
     sim->lineUsed = (unsigned char *)calloc((size_t)map->lineCount, 1);
     sim->lineTried = (unsigned char *)calloc((size_t)map->lineCount, 1);

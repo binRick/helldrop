@@ -663,7 +663,11 @@ void LevelMeshFree(LevelMesh *lm)
     for (int i = 0; i < lm->slotCount; i++) {
         if (lm->slotMesh) UnloadMesh(lm->slotMesh[i]);
         for (int f = 0; f < lm->slots[i].frames; f++) UnloadTexture(lm->slots[i].tex[f]);
-        if (lm->slotMat) { lm->slotMat[i].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){ 0 }; UnloadMaterial(lm->slotMat[i]); }
+        if (lm->slotMat) {
+            lm->slotMat[i].maps[MATERIAL_MAP_DIFFUSE].texture = (Texture2D){ 0 };
+            lm->slotMat[i].shader = (Shader){ 0 };   // shared: owned by the caller
+            UnloadMaterial(lm->slotMat[i]);
+        }
     }
     free(lm->slotMesh);
     free(lm->slotMat);
@@ -688,4 +692,10 @@ void LevelMeshDraw(const LevelMesh *lm)
     }
     if (lm->floors.vertexCount > 0) DrawMesh(lm->floors, lm->mat, id);
     if (lm->walls.vertexCount > 0) DrawMesh(lm->walls, lm->mat, id);
+}
+
+void LevelMeshSetShader(LevelMesh *lm, Shader sh)
+{
+    if (!lm || !lm->slotMat) return;
+    for (int i = 0; i < lm->slotCount; i++) lm->slotMat[i].shader = sh;
 }

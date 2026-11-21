@@ -305,6 +305,9 @@ typedef struct Sim {
     int tEdgeCount;
     int triCount;
     unsigned char *tEdgeBlocked;   // self-healing nav: edges he got stuck on
+    int *tgStart, *tgTris;  // point->triangle uniform grid (TriAtPoint)
+    int tgW, tgH;
+    float tgOrgX, tgOrgY;
     // Fallback nav: directional sector adjacency via portal midpoints
     NavEdge *edges;
     int *edgeStart;         // sectorCount+1 prefix offsets

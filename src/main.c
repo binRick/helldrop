@@ -55,6 +55,120 @@ typedef struct Options {
 
 static GameModels gmodels;     // Blender-built 3D models (M toggles sprites)
 static float SectorLight01(const Sim *sim, int sector);
+static Vector3 DgRenderPos(const Sim *sim, float alpha);
+static Vector3 MobRenderPos(const Mob *m, float alpha);
+
+// ---- Dynamic lights: fireballs, rockets, blasts and muzzle flashes light
+// the level and the models around them (render-only, from sim state).
+#define MAX_LIGHTS 24
+#ifdef PLATFORM_WEB
+#define LVL_GLSL "#version 300 es\nprecision highp float;\n"
+#else
+#define LVL_GLSL "#version 330\n"
+#endif
+static const char *LEVEL_VS = LVL_GLSL
+    "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec4 vertexColor;\n"
+    "uniform mat4 mvp; uniform mat4 matModel;\n"
+    "out vec2 fragTexCoord; out vec4 fragColor; out vec3 fragPos;\n"
+    "void main() {\n"
+    "    fragTexCoord = vertexTexCoord; fragColor = vertexColor;\n"
+    "    fragPos = (matModel*vec4(vertexPosition, 1.0)).xyz;\n"
+    "    gl_Position = mvp*vec4(vertexPosition, 1.0);\n"
+    "}\n";
+static const char *LEVEL_FS = LVL_GLSL
+    "in vec2 fragTexCoord; in vec4 fragColor; in vec3 fragPos;\n"
+    "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
+    "uniform int lightCount; uniform vec4 lightPos[24]; uniform vec3 lightCol[24];\n"
+    "out vec4 finalColor;\n"
+    "void main() {\n"
+    "    vec3 tex = texture(texture0, fragTexCoord).rgb*colDiffuse.rgb;\n"
+    "    vec3 add = vec3(0.0);\n"
+    "    for (int i = 0; i < 24; i++) {\n"
+    "        if (i >= lightCount) break;\n"
+    "        float f = max(0.0, 1.0 - length(lightPos[i].xyz - fragPos)/lightPos[i].w);\n"
+    "        add += lightCol[i]*f*f;\n"
+    "    }\n"
+    "    finalColor = vec4(tex*(fragColor.rgb + add), 1.0);\n"
+    "}\n";
+static Shader levelShader;
+static int locLvlCount, locLvlPos, locLvlCol, locMdlCount, locMdlPos, locMdlCol;
+
+static void AddLight(Vector4 *pos, Vector3 *col, int *n, Vector3 at, float radius,
+                     float r, float g, float b, float k)
+{
+    if (*n >= MAX_LIGHTS || k <= 0.01f) return;
+    pos[*n] = (Vector4){ at.x, at.y, at.z, radius };
+    col[*n] = (Vector3){ r*k, g*k, b*k };
+    (*n)++;
+}
+
+static void UpdateDynamicLights(const Sim *sim, float alpha)
+{
+    Vector4 pos[MAX_LIGHTS];
+    Vector3 col[MAX_LIGHTS];
+    int n = 0;
+    for (int i = 0; i < BOOMS_MAX; i++) {   // blasts first: the brightest
+        const Boom *b = &sim->booms[i];
+        long age = sim->tic - b->tic;
+        if (b->tic == 0 || age < 0 || age > 11) continue;
+        float k = 1.8f*(1.0f - (float)age/12.0f);
+        AddLight(pos, col, &n, (Vector3){ b->pos.x, b->z + 24.0f, -b->pos.y }, 260.0f,
+                 1.0f, 0.62f, 0.25f, k);
+    }
+    for (int i = 0; i < PROJS_MAX; i++) {
+        const Proj *p = &sim->projs[i];
+        if (!p->alive) continue;
+        float x = p->prevPos.x + (p->pos.x - p->prevPos.x)*alpha;
+        float y = p->prevPos.y + (p->pos.y - p->prevPos.y)*alpha;
+        float z = p->prevZ + (p->z - p->prevZ)*alpha;
+        Vector3 at = { x, z, -y };
+        if (p->isRocket)                       AddLight(pos, col, &n, at, 170, 1.0f, 0.75f, 0.35f, 1.1f);
+        else if (p->ownerKind == MK_CACO)      AddLight(pos, col, &n, at, 140, 1.0f, 0.25f, 0.55f, 1.1f);
+        else if (p->ownerKind == MK_BARON || p->ownerKind == MK_HELLKNIGHT)
+                                               AddLight(pos, col, &n, at, 150, 0.35f, 1.0f, 0.35f, 1.1f);
+        else                                   AddLight(pos, col, &n, at, 140, 1.0f, 0.5f, 0.15f, 1.1f);
+    }
+    for (int i = 0; i < sim->mobCount; i++) {   // arch-vile fire on his target
+        const Mob *m = &sim->mobs[i];
+        if (m->kind != MK_ARCHVILE || m->state != MOB_ATTACK) continue;
+        Vector3 at = (m->targetMob < 0) ? DgRenderPos(sim, alpha)
+                                        : MobRenderPos(&sim->mobs[m->targetMob], alpha);
+        at.y += 30.0f;
+        AddLight(pos, col, &n, at, 200, 1.0f, 0.55f, 0.1f, 1.4f);
+    }
+    for (int i = 0; i < TRACERS_MAX; i++) {     // muzzle flashes
+        const Tracer *t = &sim->tracers[i];
+        if (t->ttl <= 0) continue;
+        float k = (t->fromDG ? 0.9f : 0.6f)*(float)t->ttl/4.0f;
+        AddLight(pos, col, &n, t->a, 120, 1.0f, 0.85f, 0.55f, k);
+    }
+    SetShaderValue(levelShader, locLvlCount, &n, SHADER_UNIFORM_INT);
+    if (n > 0) {
+        SetShaderValueV(levelShader, locLvlPos, pos, SHADER_UNIFORM_VEC4, n);
+        SetShaderValueV(levelShader, locLvlCol, col, SHADER_UNIFORM_VEC3, n);
+    }
+    if (gmodels.any) {
+        SetShaderValue(gmodels.shader, locMdlCount, &n, SHADER_UNIFORM_INT);
+        if (n > 0) {
+            SetShaderValueV(gmodels.shader, locMdlPos, pos, SHADER_UNIFORM_VEC4, n);
+            SetShaderValueV(gmodels.shader, locMdlCol, col, SHADER_UNIFORM_VEC3, n);
+        }
+    }
+}
+// Render-only smoothed facings: the sim turns in 35 Hz steps; models
+// would visibly snap, so the displayed yaw eases toward the sim's.
+static float mobYaw[MOBS_MAX];
+static bool mobYawInit[MOBS_MAX];
+static float dgYaw;
+
+static float SmoothYaw(float *cur, bool *init, float target)
+{
+    if (!*init) { *cur = target; *init = true; return target; }
+    float d = fmodf(target - *cur + 540.0f, 360.0f) - 180.0f;
+    float k = 1.0f - expf(-GetFrameTime()*14.0f);
+    *cur += d*k;
+    return *cur;
+}
 static bool debugHud;          // F1: the developer overlay
 static int howtoFrames;         // start-of-match "how to play" card
 
@@ -225,19 +339,6 @@ static ThingCat ThingCategory(int doomednum)
     return CAT_OTHER;
 }
 
-static Color ThingColor(ThingCat cat)
-{
-    switch (cat) {
-    case CAT_PLAYER:  return (Color){ 60, 255, 100, 255 };
-    case CAT_MONSTER: return (Color){ 225,  45,  40, 255 };
-    case CAT_BOSS:    return (Color){ 140,  12,  12, 255 };
-    case CAT_WEAPON:  return (Color){ 250, 215,  50, 255 };
-    case CAT_HEALTH:  return (Color){  70, 130, 255, 255 };
-    case CAT_KEY:     return (Color){ 240,  60, 240, 255 };
-    default:          return (Color){ 185, 185, 185, 255 };
-    }
-}
-
 static bool PointInTri2D(float px, float pz,
                          float ax, float az, float bx, float bz, float cx, float cz)
 {
@@ -334,7 +435,10 @@ static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
     if (gmodels.enabled && gmodels.marine.loaded) {
         ModelClip clip; float ct; bool loop;
         DgModelPose(&sim->dg, sim->tic, alpha, &clip, &ct, &loop);
-        GameModelDraw(&gmodels, &gmodels.marine, p, sim->dg.angleDeg, clip, ct, loop,
+        static bool dgInit;
+        if (sim->tic < 2) dgInit = false;
+        float yaw = SmoothYaw(&dgYaw, &dgInit, sim->dg.angleDeg);
+        GameModelDraw(&gmodels, &gmodels.marine, p, yaw, clip, ct, loop,
                       WHITE, SectorLight01(sim, sim->dg.sector));
         return;
     }
@@ -442,7 +546,8 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
             Color tint = WHITE;
             if (m->kind == MK_SPECTRE) tint = (Color){ 40, 40, 58, 255 };
             if (m->state == MOB_PAIN && ((sim->tic/2) & 1)) tint = (Color){ 255, 200, 200, 255 };
-            GameModelDraw(&gmodels, gmdl, p, m->angleDeg, clip, ct, loop, tint,
+            float yaw = (m->state == MOB_DEAD) ? mobYaw[i] : SmoothYaw(&mobYaw[i], &mobYawInit[i], m->angleDeg);
+            GameModelDraw(&gmodels, gmdl, p, yaw, clip, ct, loop, tint,
                           SectorLight01(sim, m->sector));
         } else if (f0(gs, m, sim->tic)) {
             const SpriteFrame *f = f0(gs, m, sim->tic);
@@ -1096,6 +1201,7 @@ static bool ReloadLevel(const Wad *wad, const char *mapName, DoomMap *map,
     MapFree(map);
     if (!MapLoadFromWad(map, wad, mapName)) return false;
     if (!LevelMeshBuild(lm, map, wad)) return false;
+    if (levelShader.id) LevelMeshSetShader(lm, levelShader);
     *thingHeights = ComputeThingHeights(map, &lm->floors);
     if (!SimInit(sim, map, lm)) return false;
     if (StateLogEnabled()) {
@@ -1776,6 +1882,11 @@ int main(int argc, char **argv)
         StateLogClose();
         return 1;
     }
+    levelShader = LoadShaderFromMemory(LEVEL_VS, LEVEL_FS);
+    locLvlCount = GetShaderLocation(levelShader, "lightCount");
+    locLvlPos = GetShaderLocation(levelShader, "lightPos");
+    locLvlCol = GetShaderLocation(levelShader, "lightCol");
+    levelShader.locs[SHADER_LOC_MATRIX_MODEL] = GetShaderLocation(levelShader, "matModel");
     if (!LevelMeshBuild(&lm, &map, &wad)) {
         TraceLog(LOG_ERROR, "MAIN: failed to build level mesh for '%s'", curMap);
         MapFree(&map);
@@ -1785,6 +1896,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    if (levelShader.id) LevelMeshSetShader(&lm, levelShader);
     thingHeights = ComputeThingHeights(&map, &lm.floors);
     LogLevelLoaded(&opt, &map, &lm);
 
@@ -1836,6 +1948,9 @@ int main(int argc, char **argv)
     {
         const char *mdir = getenv("HELLDROP_MODEL_DIR");
         if (GameModelsLoad(&gmodels, mdir ? mdir : "assets/models")) {
+            locMdlCount = GetShaderLocation(gmodels.shader, "lightCount");
+            locMdlPos = GetShaderLocation(gmodels.shader, "lightPos");
+            locMdlCol = GetShaderLocation(gmodels.shader, "lightCol");
             GameModelsRenderPortraits(&gmodels);
             TraceLog(LOG_INFO, "MAIN: 3D models loaded (M toggles sprites)");
         }
@@ -1915,8 +2030,11 @@ static void AutodropTick(Sim *simp)
         }
 }
 
+static double frameWorkStart, frameWorkMs;
+
 static bool HelldropFrame(void)
 {
+        frameWorkStart = GetTime();
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
         CameraUpdate(&vs, dt);
@@ -1938,6 +2056,7 @@ static bool HelldropFrame(void)
             SimFree(&sim);
             SimInit(&sim, &map, &lm);
             simAcc = 0.0;
+            memset(mobYawInit, 0, sizeof(mobYawInit));
         }
         int wantKind = -1;
         bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
@@ -2082,6 +2201,7 @@ static bool HelldropFrame(void)
         float simAlpha = (float)(simAcc / SIM_TICTIME);
 
         GameAudioDrain(&gaudio, &sim, (Vector2){ vs.target.x, -vs.target.z });
+        if (levelShader.id) UpdateDynamicLights(&sim, simAlpha);
 
         // Doomcam pass: his view into a 320x200 target (drawn as PiP, or
         // fullscreen for the death takeover).
@@ -2180,6 +2300,7 @@ static bool HelldropFrame(void)
                              (Color){ 255, 80, 70, 255 });
         }
         MeltDraw(&melt);
+        frameWorkMs = (GetTime() - frameWorkStart)*1000.0;
         EndDrawing();
 
         // Media capture: a numbered PNG per (Nth) frame for stitching into
@@ -2195,7 +2316,9 @@ static bool HelldropFrame(void)
 
         if (frame % 12 == 0) LogSnapshot(&vs, &sim);
         {   // perf: wall ms per frame, summarized once a second
-            static double last, acc, worst, winStart; static int n;
+            static double last, acc, worst, winStart, workAcc, workWorst; static int n;
+            workAcc += frameWorkMs;
+            if (frameWorkMs > workWorst) workWorst = frameWorkMs;
             double now = GetTime();
             if (last > 0) { double ms = (now - last)*1000.0; acc += ms; n++; if (ms > worst) worst = ms; }
             last = now;
@@ -2206,10 +2329,14 @@ static bool HelldropFrame(void)
                     StateLogFloat("fps", n/(now - winStart));
                     StateLogFloat("ms_avg", acc/n);
                     StateLogFloat("ms_max", worst);
+                    // CPU work per frame before the swap: what a hidden test
+                    // window's WindowServer-bound present can't distort.
+                    StateLogFloat("work_ms_avg", workAcc/n);
+                    StateLogFloat("work_ms_max", workWorst);
                     StateLogInt("mobs", sim.mobCount);
                     StateLogEnd();
                 }
-                acc = worst = 0; n = 0; winStart = now;
+                acc = worst = workAcc = workWorst = 0; n = 0; winStart = now;
             }
         }
         frame++;
@@ -2236,6 +2363,7 @@ static void MainCleanup(void)
     GameAudioUnload(&gaudio);
     CloseAudioDevice();
     GameModelsUnload(&gmodels);
+    if (levelShader.id) UnloadShader(levelShader);
     GameSpritesUnload(&gsprites);
     DoomHudUnload(&hud);
     SimFree(&sim);

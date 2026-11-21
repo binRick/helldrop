@@ -47,6 +47,7 @@ static const char *MODEL_FS = GLSL_HEAD
     "in vec2 fragTexCoord; in vec3 fragNormal; in vec4 fragColor; in vec3 fragPos;\n"
     "uniform sampler2D texture0; uniform vec4 colDiffuse;\n"
     "uniform vec3 lightDir; uniform float ambient; uniform vec3 rimColor;\n"
+    "uniform int lightCount; uniform vec4 lightPos[24]; uniform vec3 lightCol[24];\n"
     "out vec4 finalColor;\n"
     "void main() {\n"
     "    vec4 albedo = texture(texture0, fragTexCoord)*colDiffuse;\n"
@@ -54,7 +55,14 @@ static const char *MODEL_FS = GLSL_HEAD
     "    float key = max(dot(n, -lightDir), 0.0);\n"
     "    float fill = max(dot(n, vec3(0.3, -0.2, 0.6)), 0.0)*0.25;\n"
     "    float rim = pow(1.0 - max(n.y*0.4 + 0.6*abs(dot(n, normalize(vec3(-lightDir.x, 0.0, -lightDir.z)))), 0.0), 3.0);\n"
-    "    vec3 c = albedo.rgb*(ambient + key*0.95 + fill) + rimColor*rim*0.35;\n"
+    "    vec3 dyn = vec3(0.0);\n"
+    "    for (int i = 0; i < 24; i++) {\n"
+    "        if (i >= lightCount) break;\n"
+    "        vec3 d = lightPos[i].xyz - fragPos;\n"
+    "        float f = max(0.0, 1.0 - length(d)/lightPos[i].w);\n"
+    "        dyn += lightCol[i]*f*f*max(dot(n, normalize(d)), 0.2);\n"
+    "    }\n"
+    "    vec3 c = albedo.rgb*(ambient + key*0.95 + fill + dyn) + rimColor*rim*0.35;\n"
     "    finalColor = vec4(c, albedo.a);\n"
     "}\n";
 
