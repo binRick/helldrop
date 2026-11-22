@@ -19,6 +19,7 @@ typedef struct SpriteFrame {
     bool mirror[8];
     short botOfs[8];    // authentic patch offsets: sprite bottom relative
                         // to the entity origin (topoffset - height)
+    unsigned char texelsPerUnit[8];
     bool present;
 } SpriteFrame;
 
@@ -52,8 +53,8 @@ void GameSpritesUnload(GameSprites *gs);
 
 // Frame selection: returns NULL when the needed frame is missing (caller
 // falls back to shapes). `tic` drives walk cycles and death sequences.
-const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic);
-const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long tic);
+const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic, float stride);
+const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long tic, float stride);
 const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long tic);
 const SpriteFrame *ProjSpriteFrame(const GameSprites *gs, const Proj *p, long tic);
 const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long age);
@@ -70,5 +71,7 @@ int SpriteRotationFrom(float entAngleDeg, Vector2 viewerDoom, Vector2 entDoom);
 // Billboard with feet anchored at base (world coords), 1 sprite px = 1 unit.
 void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
                          Vector3 base, Color tint);
+void DrawWalkingSprite(Camera3D cam, const SpriteFrame *f, int rot,
+                       Vector3 base, Color tint, float stride, float motion);
 
 #endif

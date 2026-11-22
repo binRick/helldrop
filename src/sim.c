@@ -2311,6 +2311,7 @@ static void MobTick(Sim *sim, int idx)
     Mob *m = &sim->mobs[idx];
     m->prevPos = m->pos;
     m->prevZ = m->z;
+    m->prevAngleDeg = m->angleDeg;
     if (m->state == MOB_DEAD) return;
 
     const MobInfo *inf = &MOB_INFO[m->kind];
@@ -3477,6 +3478,7 @@ static void DgTick(Sim *sim)
     DoomGuy *dg = &sim->dg;
     dg->prevPos = dg->pos;
     dg->prevZ = dg->z;
+    dg->prevAngleDeg = dg->angleDeg;
 
     if (dg->state == DG_EXITED || dg->state == DG_DEAD)
         return;
@@ -3653,7 +3655,7 @@ static bool SpawnDoomGuy(Sim *sim)
         DoomGuy *dg = &sim->dg;
         dg->pos = (Vector2){ map->things[i].x, map->things[i].y };
         dg->prevPos = dg->pos;
-        dg->angleDeg = map->things[i].angleDeg;
+        dg->angleDeg = dg->prevAngleDeg = map->things[i].angleDeg;
         dg->health = 100;
         dg->armor = 0;
         dg->bullets = 50;                    // vanilla pistol start
@@ -3713,7 +3715,7 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     m->kind = kind;
     m->pos = m->prevPos = (Vector2){ x, y };
     m->z = m->prevZ = floorH + (MOB_INFO[kind].flyer ? 40.0f : 0.0f);
-    m->angleDeg = angleDeg;
+    m->angleDeg = m->prevAngleDeg = angleDeg;
     m->health = MOB_INFO[kind].health;
     m->state = awake ? MOB_CHASE : MOB_IDLE;
     m->awake = awake;
@@ -4099,7 +4101,12 @@ void SimTick(Sim *sim)
     for (int i = 0; i < sim->doorCount; i++) DoorTick(sim, i);
     for (int i = 0; i < sim->liftCount; i++) LiftTick(sim, i);
     DgTick(sim);
-    for (int i = 0; i < sim->mobCount; i++) MobTick(sim, i);
+    sim->dg.walkDistance += Dist2D(sim->dg.pos, sim->dg.prevPos);
+    for (int i = 0; i < sim->mobCount; i++) {
+        MobTick(sim, i);
+        Mob *mob = &sim->mobs[i];
+        mob->walkDistance += Dist2D(mob->pos, mob->prevPos);
+    }
     for (int i = 0; i < PROJS_MAX; i++) {
         if (sim->projs[i].alive) ProjTick(sim, &sim->projs[i]);
     }

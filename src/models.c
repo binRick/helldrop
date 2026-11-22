@@ -281,14 +281,14 @@ void MobModelPose(const Mob *mob, int idx, long tic, float alpha,
         return;
     case MOB_PAIN:
         *clip = CLIP_PAIN;
-        *t = (float)(6 - mob->stateTics)/35.0f;
+        *t = ((float)(6 - mob->stateTics) + alpha)/35.0f;
         if (*t < 0.0f) *t = 0.0f;
         return;
     case MOB_ATTACK:
     case MOB_RAISE: {
         int total = (mob->kind == MK_ARCHVILE) ? 24 : 10;
         *clip = CLIP_ATTACK;
-        float p = (float)(total - mob->stateTics)/(float)total;
+        float p = ((float)(total - mob->stateTics) + alpha)/(float)total;
         if (p < 0.0f) p = 0.0f;
         // Attack clips are ~0.6s with the hit at ~60%: map windup onto that.
         *t = p*0.6f;
@@ -325,7 +325,7 @@ void DgModelPose(const DoomGuy *dg, long tic, float alpha, ModelClip *clip,
               : (dg->weapon == WPN_CHAINGUN) ? 4 : 10;
     if (dg->state == DG_FIGHT && dg->fireCooldown > cdMax - 8) {
         *clip = CLIP_ATTACK; *loop = false;
-        *t = (float)(cdMax - dg->fireCooldown)/35.0f + 0.25f;
+        *t = ((float)(cdMax - dg->fireCooldown) + alpha)/35.0f + 0.25f;
         return;
     }
     float dx = dg->pos.x - dg->prevPos.x, dy = dg->pos.y - dg->prevPos.y;

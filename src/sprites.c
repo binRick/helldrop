@@ -99,7 +99,7 @@ static const char *ALPHA_TEST_FS =
 #endif
 
 static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex,
-                        bool mirror, short botOfs)
+                        bool mirror, short botOfs, unsigned char scale)
 {
     if (frame < 0 || frame >= SPR_FRAMES) return;
     SpriteFrame *f = &set->frames[frame];
@@ -108,11 +108,13 @@ static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex,
             f->tex[r] = tex;
             f->mirror[r] = false;
             f->botOfs[r] = botOfs;
+            f->texelsPerUnit[r] = scale;
         }
     } else if (rot >= 1 && rot <= 8) {
         f->tex[rot - 1] = tex;
         f->mirror[rot - 1] = mirror;
         f->botOfs[rot - 1] = botOfs;
+        f->texelsPerUnit[rot - 1] = scale;
     } else {
         return;
     }
@@ -120,8 +122,68 @@ static void SetRegister(SpriteSet *set, int frame, int rot, Texture2D tex,
     set->any = true;
 }
 
+// Refine the coverage of a sprite's outline at half-texel spacing while
+// retaining high-contrast features such as the visor slit and weapon edges.
+// Ignore RGB from clear source pixels to keep cutout edges free of dark halos.
+static bool LoadDetailedPatch(const Wad *wad, int lump, const unsigned char *pal,
+                              Texture2D *texture)
+{
+    Image source;
+    if (!DoomPatchToImage(wad, lump, pal, &source)) return false;
+    int width = source.width*2;
+    int height = source.height*2;
+    Color *pixels = malloc((size_t)width*height*sizeof(*pixels));
+    if (!pixels) { UnloadImage(source); return false; }
+
+    const Color *input = source.data;
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int sx = x/2, sy = y/2;
+            int nx = sx + (x%2 ? 1 : -1), ny = sy + (y%2 ? 1 : -1);
+            Color center = input[sy*source.width + sx];
+            Color samples[] = {
+                center,
+                nx >= 0 && nx < source.width ? input[sy*source.width + nx] : (Color){0},
+                ny >= 0 && ny < source.height ? input[ny*source.width + sx] : (Color){0},
+                nx >= 0 && nx < source.width && ny >= 0 && ny < source.height
+                    ? input[ny*source.width + nx] : (Color){0},
+            };
+            const int weights[] = { 9, 3, 3, 1 };
+            int coverage = 0, sumR = 0, sumG = 0, sumB = 0, total = 0;
+            for (int n = 0; n < 4; n++) {
+                Color sample = samples[n];
+                if (!sample.a) continue;
+                coverage += weights[n];
+                int difference = abs(center.r - sample.r) + abs(center.g - sample.g) + abs(center.b - sample.b);
+                if (n && center.a && difference > 100) continue;
+                total += weights[n];
+                sumR += sample.r*weights[n];
+                sumG += sample.g*weights[n];
+                sumB += sample.b*weights[n];
+            }
+            Color result = { 0 };
+            if (total) {
+                // A restrained highlight along the top edge and a small
+                // contact shadow along the bottom give the cutout depth.
+                float light = !samples[2].a ? (y%2 ? 0.92f : 1.10f) : 1.0f;
+                result = (Color){ (unsigned char)fminf(255, light*sumR/total),
+                                  (unsigned char)fminf(255, light*sumG/total),
+                                  (unsigned char)fminf(255, light*sumB/total),
+                                  (unsigned char)(coverage*255/16) };
+            }
+            pixels[y*width + x] = result;
+        }
+    }
+    Image enhanced = { pixels, width, height, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8 };
+    *texture = LoadTextureFromImage(enhanced);
+    if (texture->id) SetTextureFilter(*texture, TEXTURE_FILTER_BILINEAR);
+    free(pixels);
+    UnloadImage(source);
+    return texture->id != 0;
+}
+
 static void SpriteSetLoad(SpriteSet *set, const Wad *wad, const char *name4,
-                          const unsigned char *pal)
+                          const unsigned char *pal, bool detailed)
 {
     memset(set, 0, sizeof(*set));
     for (int i = 0; i < wad->lumpCount; i++) {
@@ -129,13 +191,14 @@ static void SpriteSetLoad(SpriteSet *set, const Wad *wad, const char *name4,
         size_t len = strlen(n);
         if ((len != 6 && len != 8) || strncmp(n, name4, 4) != 0) continue;
         Texture2D tex;
-        if (!DoomPatchToTexture(wad, i, pal, &tex)) continue;
+        unsigned char scale = detailed && LoadDetailedPatch(wad, i, pal, &tex) ? 2 : 1;
+        if (scale == 1 && !DoomPatchToTexture(wad, i, pal, &tex)) continue;
         int w = 0, h = 0, lo = 0, to = 0;
         DoomPatchInfo(wad, i, &w, &h, &lo, &to);
         short botOfs = (short)(to - h);
         if (set->ownedCount < SPR_FRAMES*8) set->owned[set->ownedCount++] = tex;
-        SetRegister(set, n[4] - 'A', n[5] - '0', tex, false, botOfs);
-        if (len == 8) SetRegister(set, n[6] - 'A', n[7] - '0', tex, true, botOfs);
+        SetRegister(set, n[4] - 'A', n[5] - '0', tex, false, botOfs, scale);
+        if (len == 8) SetRegister(set, n[6] - 'A', n[7] - '0', tex, true, botOfs, scale);
     }
 }
 
@@ -152,20 +215,20 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
     if (!DoomLoadPalette(wad, pal)) return false;
 
     for (int k = 0; k < MK_COUNT; k++) {
-        SpriteSetLoad(&gs->mobs[k], wad, MOB_ANIM[k].lump, pal);
+        SpriteSetLoad(&gs->mobs[k], wad, MOB_ANIM[k].lump, pal, true);
     }
-    SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal);
-    SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal);
-    SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal);
-    SpriteSetLoad(&gs->baronBall, wad, "BAL7", pal);
-    SpriteSetLoad(&gs->fatShot, wad, "MANF", pal);
-    SpriteSetLoad(&gs->tracer, wad, "FATB", pal);
-    SpriteSetLoad(&gs->tracerBoom, wad, "FBXP", pal);
-    SpriteSetLoad(&gs->missile, wad, "MISL", pal);
-    SpriteSetLoad(&gs->barrel, wad, "BAR1", pal);
-    SpriteSetLoad(&gs->fire, wad, "FIRE", pal);
+    SpriteSetLoad(&gs->player, wad, PLAYER_ANIM.lump, pal, true);
+    SpriteSetLoad(&gs->ball[0], wad, "BAL1", pal, false);
+    SpriteSetLoad(&gs->ball[1], wad, "BAL2", pal, false);
+    SpriteSetLoad(&gs->baronBall, wad, "BAL7", pal, false);
+    SpriteSetLoad(&gs->fatShot, wad, "MANF", pal, false);
+    SpriteSetLoad(&gs->tracer, wad, "FATB", pal, false);
+    SpriteSetLoad(&gs->tracerBoom, wad, "FBXP", pal, false);
+    SpriteSetLoad(&gs->missile, wad, "MISL", pal, false);
+    SpriteSetLoad(&gs->barrel, wad, "BAR1", pal, true);
+    SpriteSetLoad(&gs->fire, wad, "FIRE", pal, false);
     for (int p = 0; p < PK_COUNT; p++) {
-        SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal);
+        SpriteSetLoad(&gs->pickups[p], wad, PICKUP_LUMPS[p], pal, true);
     }
 
     // Decorations share sprite sets by name (PLAY/POSS corpses reuse the
@@ -177,7 +240,7 @@ bool GameSpritesLoad(GameSprites *gs, const Wad *wad)
             for (int e = 0; e < d && same < 0; e++) if (strcmp(DECO[e].lump, DECO[d].lump) == 0) same = e;
             if (same >= 0) { gs->decoAlias[d] = (short)same; continue; }
             gs->decoAlias[d] = (short)d;
-            SpriteSetLoad(&gs->deco[d], wad, DECO[d].lump, pal);
+            SpriteSetLoad(&gs->deco[d], wad, DECO[d].lump, pal, false);
         }
     }
 
@@ -227,7 +290,7 @@ static const SpriteFrame *PickDeath(const SpriteSet *set, const char *seq,
     return Pick(set, seq[i]);
 }
 
-const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic)
+const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic, float stride)
 {
     const SpriteSet *set = &gs->mobs[m->kind];
     if (!set->any) return NULL;
@@ -254,12 +317,14 @@ const SpriteFrame *MobSpriteFrame(const GameSprites *gs, const Mob *m, long tic)
     }
     default: {
         int n = (int)strlen(an->walk);
-        return Pick(set, an->walk[(tic/6) % n]);
+        int frame = m->state == MOB_CHASE ? (int)stride % n : 0;
+        if (MobIsFlyer(m->kind)) frame = (int)((tic/6) % n);
+        return Pick(set, an->walk[frame]);
     }
     }
 }
 
-const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long tic)
+const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long tic, float stride)
 {
     const SpriteSet *set = &gs->player;
     if (!set->any) return NULL;
@@ -269,7 +334,7 @@ const SpriteFrame *DGSpriteFrame(const GameSprites *gs, const DoomGuy *dg, long 
         return Pick(set, PLAYER_ANIM.attack[(dg->fireCooldown > cdMax - 3) ? 1 : 0]);
     }
     int n = (int)strlen(PLAYER_ANIM.walk);
-    return Pick(set, PLAYER_ANIM.walk[(tic/4) % n]);
+    return Pick(set, PLAYER_ANIM.walk[(int)stride % n]);
 }
 
 const SpriteFrame *PickupSpriteFrame(const GameSprites *gs, PickupType t, long tic)
@@ -344,8 +409,8 @@ int SpriteRotationFrom(float entAngleDeg, Vector2 viewerDoom, Vector2 entDoom)
     return rot;
 }
 
-void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
-                         Vector3 base, Color tint)
+static void DrawSpritePose(Camera3D cam, const SpriteFrame *f, int rot,
+                           Vector3 base, Color tint, float sway, float stretch)
 {
     Texture2D tex = f->tex[rot];
     if (tex.id == 0) {
@@ -353,14 +418,29 @@ void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
         tex = f->tex[0];
         if (tex.id == 0) return;
     }
-    float w = (float)tex.width, h = (float)tex.height;
-    Rectangle src = { 0, 0, f->mirror[rot] ? -w : w, h };
+    Rectangle src = { 0, 0, f->mirror[rot] ? -(float)tex.width : (float)tex.width, (float)tex.height };
+    float scale = f->texelsPerUnit[rot];
+    float w = (float)tex.width/scale, h = (float)tex.height/scale;
     // Authentic anchoring: the patch's topoffset places the sprite bottom
     // relative to the entity origin (cacos hang, fireballs center, feet
     // plant) — exactly as Doom positions them.
-    Vector3 center = { base.x, base.y + h*0.5f + (float)f->botOfs[rot], base.z };
-    DrawBillboardPro(cam, tex, src, center, (Vector3){ 0.0f, 1.0f, 0.0f },
-                     (Vector2){ w, h }, (Vector2){ w*0.5f, h*0.5f }, 0.0f, tint);
+    Vector3 bottom = { base.x, base.y + (float)f->botOfs[rot], base.z };
+    DrawBillboardPro(cam, tex, src, bottom, (Vector3){ 0.0f, 1.0f, 0.0f },
+                     (Vector2){ w, h*stretch }, (Vector2){ w*0.5f, 0.0f }, sway, tint);
+}
+
+void DrawSpriteBillboard(Camera3D cam, const SpriteFrame *f, int rot,
+                         Vector3 base, Color tint)
+{
+    DrawSpritePose(cam, f, rot, base, tint, 0.0f, 1.0f);
+}
+
+void DrawWalkingSprite(Camera3D cam, const SpriteFrame *f, int rot,
+                       Vector3 base, Color tint, float stride, float motion)
+{
+    float step = stride*PI/2.0f;
+    DrawSpritePose(cam, f, rot, base, tint, 2.8f*sinf(step)*motion,
+                   1.0f + (0.012f - 0.022f*cosf(step*2.0f))*motion);
 }
 
 const SpriteFrame *DecoSpriteFrame(const GameSprites *gs, int ednum, long tic)

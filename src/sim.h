@@ -141,7 +141,8 @@ typedef struct Mob {
     MobKind kind;
     Vector2 pos, prevPos;
     float z, prevZ;         // feet height (cacos float above the floor)
-    float angleDeg;
+    float angleDeg, prevAngleDeg;
+    float walkDistance;     // visual stride accumulator
     int health;
     MobState state;
     int stateTics;          // countdown inside ATTACK/PAIN
@@ -251,7 +252,8 @@ typedef enum DropResult {
 typedef struct DoomGuy {
     Vector2 pos, prevPos;   // prev values are last tic's, for render lerp
     float z, prevZ;         // ground height under feet
-    float angleDeg;         // facing, CCW from east (Doom convention)
+    float angleDeg, prevAngleDeg; // facing, CCW from east (Doom convention)
+    float walkDistance;     // visual stride accumulator
     DGState state;
     DGObjective objective;
     int sector;             // last known containing sector, -1 unknown

@@ -470,6 +470,17 @@ static Vector3 DgRenderPos(const Sim *sim, float alpha)
     return (Vector3){ x, z, -y };
 }
 
+static float InterpolateFacing(float previous, float current, float alpha)
+{
+    return previous + (fmodf(current - previous + 540.0f, 360.0f) - 180.0f)*alpha;
+}
+
+static Color SpriteLighting(const Sim *sim, int sector)
+{
+    unsigned char shade = (unsigned char)(212.0f + 43.0f*SectorLight01(sim, sector));
+    return (Color){ shade, shade, shade, 255 };
+}
+
 static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
                         Camera3D cam)
 {
@@ -485,12 +496,16 @@ static void DrawDoomGuy(const Sim *sim, float alpha, const GameSprites *gs,
                         (Color){ 90, 255, 120, 110 });
         return;
     }
-    const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, &sim->dg, sim->tic) : NULL;
+    const DoomGuy *dg = &sim->dg;
+    float travel = Vector2Distance(dg->prevPos, dg->pos);
+    float stride = (dg->walkDistance - travel*(1.0f - alpha))/22.0f;
+    const SpriteFrame *f = gs->valid ? DGSpriteFrame(gs, dg, sim->tic, stride) : NULL;
     if (f) {
-        int rot = SpriteRotationFrom(sim->dg.angleDeg,
+        int rot = SpriteRotationFrom(InterpolateFacing(dg->prevAngleDeg, dg->angleDeg, alpha),
                                      (Vector2){ cam.position.x, -cam.position.z },
                                      (Vector2){ p.x, -p.z });
-        DrawSpriteBillboard(cam, f, rot, p, WHITE);
+        DrawWalkingSprite(cam, f, rot, p, SpriteLighting(sim, dg->sector),
+                          stride, fminf(travel/4.0f, 1.0f));
         return;
     }
     Vector3 feet = { p.x, p.y + DG_RADIUS, p.z };
@@ -546,11 +561,6 @@ static const Color MOB_COLORS[MK_COUNT] = {
     [MK_PAINELEMENTAL] = { 160,  90, 110, 255 },
 };
 
-static const SpriteFrame *f0(const GameSprites *gs, const Mob *m, long tic)
-{
-    return gs->valid ? MobSpriteFrame(gs, m, tic) : NULL;
-}
-
 static float SectorLight01(const Sim *sim, int sector)
 {
     if (sector < 0 || sector >= sim->map->sectorCount) return 0.8f;
@@ -582,7 +592,11 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
                              12, (Color){ 88, 14, 14, 255 });
             }
         }
+        float travel = Vector2Distance(m->prevPos, m->pos);
+        float stride = (m->walkDistance - travel*(1.0f - alpha))/14.0f;
         const GameModel *gmdl = gmodels.enabled ? &gmodels.mob[m->kind] : NULL;
+        const SpriteFrame *sprite = (!gmdl || !gmdl->loaded) && gs->valid
+                                      ? MobSpriteFrame(gs, m, sim->tic, stride) : NULL;
         if (gmdl && gmdl->loaded && !InView(cam, (Vector3){ p.x, p.y + 28.0f, p.z }, 120.0f)) continue;
         if (gmdl && gmdl->loaded) {
             ModelClip clip; float ct; bool loop;
@@ -597,14 +611,14 @@ static void DrawMobs(const Sim *sim, float alpha, const GameSprites *gs,
                             ? (Color){ 230, 60, 40, 70 } : (Color){ 0 };
             GameModelDrawEx(&gmodels, gmdl, p, yaw, clip, ct, loop, tint,
                             SectorLight01(sim, m->sector), sil);
-        } else if (f0(gs, m, sim->tic)) {
-            const SpriteFrame *f = f0(gs, m, sim->tic);
+        } else if (sprite) {
             // Spectres render as a dark ghost of the pinky sprite.
             Color tint = (m->kind == MK_SPECTRE) ? (Color){ 38, 38, 50, 255 }
-                                                 : WHITE;
-            int rot = SpriteRotationFrom(m->angleDeg, viewer,
-                                         (Vector2){ p.x, -p.z });
-            DrawSpriteBillboard(cam, f, rot, p, tint);
+                                                 : SpriteLighting(sim, m->sector);
+            int rot = SpriteRotationFrom(InterpolateFacing(m->prevAngleDeg, m->angleDeg, alpha),
+                                         viewer, (Vector2){ p.x, -p.z });
+            float motion = m->state == MOB_CHASE && !MobIsFlyer(m->kind) ? fminf(travel/2.5f, 1.0f) : 0;
+            DrawWalkingSprite(cam, sprite, rot, p, tint, stride, motion);
         } else if (m->state == MOB_DEAD) {
             DrawCylinder(p, r*0.9f, r*0.9f, 3.0f, 8, (Color){ 95, 42, 42, 255 });
         } else {
@@ -1301,11 +1315,11 @@ static void DrawWorld(const Sim *sim, const LevelMesh *lm, const DoomMap *map,
 static Camera3D DoomcamFrom(const Sim *sim, float alpha)
 {
     Vector3 eye = DgRenderPos(sim, alpha);
-    float a = sim->dg.angleDeg*DEG2RAD;
+    float a = InterpolateFacing(sim->dg.prevAngleDeg, sim->dg.angleDeg, alpha)*DEG2RAD;
     float eyeH = 41.0f;
     if (sim->dg.state == DG_DEAD) {
-        long dt = sim->tic - sim->dg.deathTic;
-        float drop = (dt > 35) ? 1.0f : (float)dt/35.0f;
+        float dt = (float)(sim->tic - sim->dg.deathTic) + alpha;
+        float drop = fminf(dt/35.0f, 1.0f);
         eyeH = 41.0f - 33.0f*drop;
     }
     Camera3D fp = { 0 };
@@ -2405,7 +2419,7 @@ static bool HelldropFrame(void)
         CameraUpdate(&vs, dt);
 #endif
         if (vs.follow) {
-            Vector3 want = { sim.dg.pos.x, sim.dg.z, -sim.dg.pos.y };
+            Vector3 want = DgRenderPos(&sim, (float)(simAcc/SIM_TICTIME));
             float k = 1.0f - expf(-dt*5.0f);   // smooth, frame-rate independent
             vs.target = Vector3Add(vs.target, Vector3Scale(Vector3Subtract(want, vs.target), k));
         }
