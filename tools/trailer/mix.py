@@ -34,18 +34,25 @@ def decode(path):   # mp3 -> float via ffmpeg
                          capture_output=True, check=True).stdout
     return np.frombuffer(raw, dtype="float32").reshape(-1, 2).copy()
 
-def vo_trim(a, floor_db=-42):
-    """Cut ElevenLabs' stray tail: end 0.12 s after the last loud run (a quiet blip after a 0.3 s gap is dropped)."""
+def vo_trim(a, name=""):
+    """Cut ElevenLabs' end-of-clip blips. TTS clips often end: speech, 60 ms-1 s of digital
+    silence, then a short burst (often loud, often still sounding when the file stops). Working
+    back from the end, drop every burst <= 200 ms that follows >= 60 ms of near-silence, then end
+    0.12 s after the real speech. Gaps inside speech are shorter or quieter, so words survive."""
     lvl = np.abs(a).max(axis=1); win = int(0.01 * SR)
-    e = np.array([lvl[i:i + win].mean() for i in range(0, len(lvl) - win, win)])
-    thr = e.max() * 10 ** (floor_db / 20); on = e > thr
+    db = np.array([20 * np.log10(max(float(np.sqrt(np.mean(lvl[i:i + win] ** 2))), 1e-7))
+                   for i in range(0, len(lvl) - win + 1, win)])
+    pk = db.max(); on = db > pk - 45
     runs, st = [], None
     for i, v in enumerate(list(on) + [False]):
         if v and st is None: st = i
-        if not v and st is not None: runs.append((st, i, e[st:i].max())); st = None
-    pk = max(r[2] for r in runs)
-    while len(runs) > 1 and runs[-1][2] < 0.15 * pk and runs[-1][0] - runs[-2][1] >= 30: runs.pop()
+        if not v and st is not None: runs.append([st, i]); st = None
+    dropped = []
+    while len(runs) > 1 and runs[-1][1] - runs[-1][0] <= 20 and runs[-1][0] - runs[-2][1] >= 6:
+        dropped.append((runs[-1][0] / 100, runs[-1][1] / 100)); runs.pop()
+    if dropped: print(f"  {name}: dropped end blip(s) at {dropped} s")
     s, t = runs[0][0] * win, runs[-1][1] * win
+    if t >= len(a) - win: print(f"  {name}: speech runs to the file's end (cut mid-word?); faded")
     return fade(a[max(0, s - win): t + int(0.12 * SR)], 0.012, 0.06)
 
 segs = []
@@ -77,7 +84,7 @@ for s in segs:
             if m > 0: seg[j:j + m] += clip[k0:k0 + m] * (0.45 * g)
         game[a0:a0 + n] += fade(seg, 0.04, 0.04)
     if s["vo"] != "-":
-        v = vo_trim(decode(os.path.join(B, "vo", s["vo"] + ".mp3")))
+        v = vo_trim(decode(os.path.join(B, "vo", s["vo"] + ".mp3")), s["vo"])
         j = a0 + int(s["at"] * SR)
         if j + len(v) > N: sys.exit(f"narration {s['vo']} runs past the end")
         if np.abs(voice[j:j + len(v)]).max() > 0: sys.exit(f"narration {s['vo']} overlaps the previous line")
