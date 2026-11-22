@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HELLDROP</title>
 <style>
   :root { --red:#e23b2e; --ember:#ff7a2a; --blood:#7a0f0f; }
@@ -12,10 +12,10 @@
     font-family:'Courier New', monospace; color:#d9c7b0;
     display:flex; align-items:center; justify-content:center;
   }
-  /* raylib draws a 1600x900 buffer; CSS letterboxes it into the viewport. */
+  /* Fit raylib’s backing canvas into the space between the briefing and controls. */
   canvas.emscripten {
     display:block; border:0; outline:none;
-    width:100vw; height:100vh; object-fit:contain;
+    width:100%; height:100%; touch-action:none;
     image-rendering:auto; background:#0a0708;
   }
 
@@ -31,7 +31,28 @@
       #08060a;
     transition:opacity .5s ease;
   }
-  #gate.hidden { opacity:0; pointer-events:none; }
+  #game { width:100%; height:100%; display:grid; grid-template-rows:auto minmax(0,1fr) auto; }
+  #stage { display:grid; place-items:center; min-height:0; overflow:hidden; }
+  #stage canvas { width:min(100%, calc(var(--stage-height) * var(--aspect))); height:auto; aspect-ratio:var(--aspect); }
+  #brief, #controls { padding:.5rem; text-align:center; background:#151015; }
+  #brief { min-height:3.9rem; display:grid; place-content:center; gap:.25rem; }
+  #instruction { min-height:2.4em; display:grid; place-items:center; }
+  #navigation { display:flex; justify-content:center; gap:.4rem; min-width:0; }
+  #navigation select { min-width:0; max-width:55%; }
+  #brief { grid-template-columns:minmax(0, 1fr); }
+  #brief { align-content:center; }
+  #notice { min-height:1em; color:#ff9a80; font-size:.8rem; }
+  #stats { color:#ee945c; font-size:.82rem; }
+  #controls { display:flex; justify-content:center; gap:.4rem; flex-wrap:wrap; }
+  button, select { font:inherit; color:#fbe6d0; background:#261721; border:1px solid #9e5b44; border-radius:4px; padding:.55rem .65rem; min-height:44px; }
+  @media (max-width:600px) {
+    #game.episode #demon { order:-2; max-width:calc(100% - 90px); }
+    #game.episode #retry { order:-1; }
+  }
+  button:enabled { cursor:pointer; }
+  button:disabled { opacity:.5; }
+  button[aria-pressed="true"], #blast.now { background:#973922; border-color:#ff965a; }
+  [hidden] { display:none !important; }
   #gate h1 {
     font-size:clamp(2.6rem, 9vw, 6rem); letter-spacing:.18em; font-weight:900;
     color:var(--red);
@@ -44,7 +65,7 @@
     animation:pulse 1.6s ease-in-out infinite;
   }
   @keyframes pulse { 0%,100%{opacity:.55} 50%{opacity:1} }
-  #gate .hint { font-size:.72rem; letter-spacing:.12em; color:#5d5048; max-width:34rem; line-height:1.7; }
+  #gate .hint { font-size:.72rem; letter-spacing:.12em; color:#ba9f8e; max-width:34rem; padding:0 1rem; line-height:1.7; }
 
   #status {
     position:fixed; left:50%; bottom:8%; transform:translateX(-50%); z-index:21;
@@ -60,17 +81,55 @@
 </style>
 </head>
 <body>
-  <canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+  <main id="game" hidden>
+    <div id="brief">
+      <div id="navigation">
+        <select id="level" aria-label="Level">
+          <optgroup label="Training">
+            <option value="11">1 · First Drop</option>
+            <option value="12">2 · In the Shadows</option>
+            <option value="0">3 · Barrel Ambush</option>
+            <option value="1">4 · Chain Reaction</option>
+            <option value="13">5 · Hold the Door</option>
+            <option value="14">6 · Crossfire</option>
+            <option value="15">7 · The Gauntlet</option>
+          </optgroup>
+          <optgroup label="Episode 1">
+            <option value="2">E1M1</option><option value="3">E1M2</option>
+            <option value="4">E1M3</option><option value="5">E1M4</option>
+            <option value="6">E1M5</option><option value="7">E1M6</option>
+            <option value="8">E1M7</option><option value="9">E1M8</option>
+            <option value="10">E1M9</option>
+          </optgroup>
+        </select>
+        <button id="pause" type="button">Pause</button>
+        <button id="mute" type="button" aria-pressed="false">Mute</button>
+      </div>
+      <div id="instruction" aria-live="polite"></div><div id="stats"></div>
+      <div id="notice" role="status"></div>
+    </div>
+    <div id="stage"><canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas></div>
+    <div id="controls">
+      <button id="imp" type="button">Imp</button>
+      <button id="shotgunner" type="button">Shotgunner</button>
+      <select id="demon" aria-label="Demon" hidden></select>
+      <button id="door" type="button" aria-pressed="false" hidden>Door / lift</button>
+      <button id="blast" type="button" hidden>Blow barrel</button>
+      <button id="doomcam" type="button" hidden>Doomcam</button>
+      <button id="follow" type="button" hidden>Track marine</button>
+      <button id="zoom-in" type="button" aria-label="Zoom in" hidden>+</button>
+      <button id="zoom-out" type="button" aria-label="Zoom out" hidden>−</button>
+      <button id="next" type="button" hidden>Next level</button>
+      <button id="retry" type="button">Retry</button>
+      <button id="continue" type="button">Play E1M1</button>
+    </div>
+  </main>
 
   <div id="gate">
     <h1>HELLDROP</h1>
-    <div class="sub">Reverse-Doom · Knee-Deep in His Blood</div>
-    <div class="cta">▶ CLICK TO DESCEND</div>
-    <div class="hint">
-      He fights toward the exit. You drop the demons. &nbsp;1–9,0 pick a fiend ·
-      LMB drops at the cursor · F slams a door/lift · V detonates a barrel ·
-      C doomcam · TAB codex · G restart.
-    </div>
+    <div class="sub">Training grounds</div>
+    <button id="start" class="cta" type="button" disabled>Start training</button>
+    <div class="hint">Start with one summon. Work up to a coordinated ambush.</div>
   </div>
 
   <div id="status"><span id="status-text">downloading…</span><div id="spinner"></div></div>
@@ -85,7 +144,7 @@
 
     var Module = {
       canvas: canvas,
-      // Cache-bust: the build stamps its git revision here (Makefile), so a
+      // Cache-bust: the build stamps its asset hash here (Makefile), so a
       // returning visitor never pairs new code with a stale .wasm/.data.
       locateFile: function (p) { return p + '?v=HELLDROP_REV'; },
       print:    function (t) { console.log(t); },
@@ -110,36 +169,315 @@
     Module.setStatus('downloading…');
     window.onerror = function (e) { Module.setStatus('error — see console'); console.error(e); };
 
-    // The click-to-start gesture: reveal the canvas, hand keyboard focus to it,
-    // and resume the WebAudio context raylib created (suspended) at startup.
-    function startGame() {
-      if (started) return;
-      started = true;
-      gate.classList.add('hidden');
-      statusBox.classList.add('gone');
-      setTimeout(function () { gate.classList.add('gone'); }, 600);
-      try { canvas.focus(); } catch (e) {}
-      try {
-        var ctx = (Module.SDL2 && Module.SDL2.audioContext) ||
-                  (window.AL && window.AL.currentCtx && window.AL.currentCtx.audioCtx);
-        if (ctx && ctx.state === 'suspended') ctx.resume();
-        if (typeof window.AudioContext !== 'undefined') {
-          // miniaudio (raylib) parks its context on the document; nudge any that exist.
-          document.querySelectorAll('*'); // no-op keep
-        }
-      } catch (e) {}
+    var game = document.getElementById('game');
+    var stage = document.getElementById('stage');
+    var instruction = document.getElementById('instruction');
+    var stats = document.getElementById('stats');
+    var notice = document.getElementById('notice');
+    var start = document.getElementById('start');
+    var imp = document.getElementById('imp');
+    var shotgunner = document.getElementById('shotgunner');
+    var demon = document.getElementById('demon');
+    var door = document.getElementById('door');
+    var barrel = document.getElementById('blast');
+    var retry = document.getElementById('retry');
+    var continueButton = document.getElementById('continue');
+    var step = 0;
+    var tool = 0;
+    var lastStatus;
+    var currentLevel = 11;
+    var trainingOrder = [11, 12, 0, 1, 13, 14, 15];
+    var completed = [];
+    try {
+      var saved = JSON.parse(localStorage.getItem('helldrop.training'));
+      if (Array.isArray(saved)) completed = saved;
+    } catch (_) {}
+    var openingTips = {
+      11: 'Tap the green ring. The marine can see it, so the summon takes a moment.',
+      12: 'Summon behind the closed door. Hidden drops arrive instantly.',
+      0: 'Drop a demon in the green ring behind the door.',
+      1: 'Set the ambush. One blast can set off both barrels.',
+      13: 'Set a shotgunner just beyond the door.',
+      14: 'Place the shotgunner at the first ring. Land a hit with the ambush.',
+      15: 'Set the first demon before the marine can reach the medkit.'
+    };
+    var levelPicker = document.getElementById('level');
+    var pauseButton = document.getElementById('pause');
+    var follow = document.getElementById('follow');
+    var doomcam = document.getElementById('doomcam');
+    var mute = document.getElementById('mute');
+    var muted = false;
+    try { muted = localStorage.getItem('helldrop.muted') === 'true'; } catch (_) {}
+    var zoomIn = document.getElementById('zoom-in');
+    var zoomOut = document.getElementById('zoom-out');
+    var next = document.getElementById('next');
+    var best = [0, 0];
+    var episodeBests = {};
+    var nextLevel = -1;
+    var lastEpisodeStatus;
+    var scoreKeys = { 0:'helldrop.bestBlast', 1:'helldrop.bestChain', 15:'helldrop.bestGauntlet' };
+    for (var i of Object.keys(scoreKeys)) {
+      try { best[i] = Number(localStorage.getItem(scoreKeys[i])) || 0; } catch (_) {}
     }
-    gate.addEventListener('click', startGame);
-    gate.addEventListener('touchstart', startGame, { passive:true });
-    window.addEventListener('keydown', function (e) {
-      if (!started) { startGame(); }
-      // Stop the browser from scrolling/space-activating while playing.
-      if (started && [' ','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Tab'].indexOf(e.key) !== -1) {
-        e.preventDefault();
+
+    try { episodeBests = JSON.parse(localStorage.getItem('helldrop.episodeBests')) || {}; } catch (_) {}
+    if (typeof episodeBests !== 'object' || Array.isArray(episodeBests)) episodeBests = {};
+
+    function labelMaps() {
+      for (var option of levelPicker.options) {
+        var level = Number(option.value);
+        if (trainingOrder.includes(level)) {
+          if (completed.includes(level) && !option.textContent.endsWith(' ✓'))
+            setText(option, option.textContent + ' ✓');
+        } else {
+          setText(option, 'E1M' + (level - 1) + (episodeBests[option.value] >= 0 ? ' ✓' : ''));
+        }
+      }
+    }
+
+    function setupGame(width, height) {
+      labelMaps();
+      stage.style.setProperty('--aspect', width / height);
+      new ResizeObserver(function () {
+        stage.style.setProperty('--stage-height', stage.clientHeight + 'px');
+      }).observe(stage);
+      new MutationObserver(function () {
+        if (canvas.width && canvas.height)
+          stage.style.setProperty('--aspect', canvas.width / canvas.height);
+      }).observe(canvas, { attributes:true, attributeFilter:['width','height'] });
+      start.disabled = false;
+    }
+
+    function setText(element, value) {
+      if (element.textContent !== value) element.textContent = value;
+    }
+
+    function addDemon(kind, name, cost) {
+      var label = name === 'shotgunguy' ? 'Shotgunner' : name[0].toUpperCase() + name.slice(1);
+      demon.add(new Option(label + ' · ' + cost + ' souls', kind));
+      if (name === 'imp') imp.value = kind;
+      if (name === 'shotgun guy' || name === 'shotgunguy') shotgunner.value = kind;
+    }
+
+    function updateGame(nextStep, kind, souls, health, near, mode, blastDamage, level, paused, chain) {
+      var status = [nextStep, kind, souls, health, near, mode, blastDamage, level, paused, chain].join();
+      if (status === lastStatus) return;
+      lastStatus = status;
+      step = nextStep;
+      tool = mode;
+      door.setAttribute('aria-pressed', tool === 1);
+      barrel.setAttribute('aria-pressed', tool === 2);
+      currentLevel = level;
+      if (levelPicker.value !== String(level)) levelPicker.value = level;
+      setText(pauseButton, paused ? 'Resume' : 'Pause');
+      var full = !trainingOrder.includes(level);
+      game.classList.toggle('episode', full);
+      var ended = step === 3 || step === 4 || (step >= 7 && step <= 9);
+      var message = [
+        openingTips[level],
+        near ? 'He’s in range. Blow the barrel!' : 'Wait until he’s close to the barrel.',
+        'The barrel is gone. See if your demon can finish him.',
+        level === 11 ? 'Shotgunner summoned.' : level === 12 ? 'Hidden summon deployed instantly.'
+                    : level === 14 ? 'Crossfire landed a hit.'
+                    : level === 15 ? 'Training complete. Try Episode 1.' : 'Lesson cleared.',
+        'He reached the exit. Retry the lesson.',
+        tool === 1 ? 'Tap a door or lift.' : tool === 2 ? 'Tap near a barrel.' : 'Choose a demon and tap the map.',
+        'Marine down.',
+        level === 9 ? 'Episode cleared. Replay any map from the level menu.' : 'Marine down. Continue the invasion.',
+        'He reached the exit. Retry and cover his route.',
+        'The marine lost his route. Retry or pick another map.',
+        level === 13 ? 'Watch the door hold him back while your demon waits.' : 'Watch your demons intercept him.',
+        '',
+        'Slam the door to hold the marine and start the ambush.',
+        level === 14 ? 'Now place the imp on the other side of the doorway.' : 'Place a second demon at the next ring.'
+      ][step];
+      setText(instruction, paused ? 'Paused' : message);
+      if (step === 3 && !completed.includes(level)) {
+        completed.push(level);
+        labelMaps();
+        try { localStorage.setItem('helldrop.training', JSON.stringify(completed)); } catch (_) {}
+      }
+      if (step === 3 && scoreKeys[level] && blastDamage > (best[level] || 0)) {
+        best[level] = blastDamage;
+        try { localStorage.setItem(scoreKeys[level], String(blastDamage)); } catch (_) {}
+      }
+      var liveStats = souls + ' souls  ·  Marine ' + Math.max(0, health) + '%';
+      var score = (blastDamage >= 0 ? 'Blast damage ' + blastDamage : scoreKeys[level] ? 'Barrel unused' : 'Marine ' + health + '%')
+                  + (chain > 1 ? '  ·  ' + chain + ' barrels chained' : '')
+                  + (best[level] ? '  ·  Best winning blast ' + best[level] : '');
+      if (!full || step !== 7) setText(stats, !full && ended ? score : liveStats);
+      pauseButton.disabled = ended || step === 6;
+      retry.disabled = continueButton.disabled = step === 6;
+      doomcam.hidden = follow.hidden = zoomIn.hidden = zoomOut.hidden = !full;
+      if (step !== 7) next.hidden = true;
+      next.disabled = paused;
+      imp.hidden = shotgunner.hidden = step !== 0 || (level !== 0 && level !== 1);
+      imp.setAttribute('aria-pressed', Number(imp.value) === kind);
+      shotgunner.setAttribute('aria-pressed', Number(shotgunner.value) === kind);
+      demon.hidden = !full || ended;
+      door.hidden = full ? ended : step !== 12;
+      if (!full) setText(door, 'Slam door · 15');
+      imp.disabled = shotgunner.disabled = demon.disabled = door.disabled = barrel.disabled = !!paused;
+      if (demon.value !== String(kind)) demon.value = kind;
+      barrel.hidden = full ? ended : step !== 1;
+      barrel.classList.toggle('now', step === 1 && !!near);
+      continueButton.hidden = full;
+      setText(continueButton, step === 3 && level !== 15 ? 'Next lesson' : 'Play E1M1');
+      if (!full) setText(barrel, 'Blow barrel');
+    }
+
+    function updateEpisode(nextMap, ticks, barrelCooldown, doorCooldown) {
+      var status = [currentLevel, step, nextMap, ticks, barrelCooldown, doorCooldown].join();
+      if (status === lastEpisodeStatus) return;
+      lastEpisodeStatus = status;
+      nextLevel = nextMap;
+      next.hidden = nextMap < 0;
+      if (nextMap >= 0) setText(next, 'Next · E1M' + (nextMap - 1));
+      setText(barrel, barrelCooldown ? 'Barrel · ' + barrelCooldown + 's' : 'Barrel · 30');
+      setText(door, doorCooldown ? 'Door / lift · ' + doorCooldown + 's' : 'Door / lift · 15 / 20');
+      if (ticks < 0) return;
+      var previous = episodeBests[currentLevel];
+      if (!Number.isFinite(previous) || ticks < previous) {
+        episodeBests[currentLevel] = ticks;
+        labelMaps();
+        try { localStorage.setItem('helldrop.episodeBests', JSON.stringify(episodeBests)); } catch (_) {}
+      }
+      setText(stats, 'Clear ' + (ticks / 35).toFixed(1) + 's  ·  Best ' +
+                     (episodeBests[currentLevel] / 35).toFixed(1) + 's');
+    }
+
+    function setNotice(message) {
+      setText(notice, message);
+    }
+
+    function selectTool(value) {
+      tool = value;
+      door.setAttribute('aria-pressed', tool === 1);
+      barrel.setAttribute('aria-pressed', tool === 2);
+      Module._WebAction(4, value);
+    }
+
+    function pick(value) {
+      selectTool(0);
+      Module._WebAction(3, Number(value));
+    }
+
+    imp.addEventListener('click', function () { pick(imp.value); });
+    shotgunner.addEventListener('click', function () { pick(shotgunner.value); });
+    demon.addEventListener('change', function () { pick(demon.value); });
+    door.addEventListener('click', function () { selectTool(tool === 1 ? 0 : 1); });
+    barrel.addEventListener('click', function () {
+      if (step === 1) Module._WebAction(5, 0);
+      if (step === 5) selectTool(tool === 2 ? 0 : 2);
+    });
+    retry.addEventListener('click', function () { selectTool(0); Module._WebAction(1, 0); });
+    function chooseLevel(level) {
+      selectTool(0);
+      Module._WebAction(2, level);
+    }
+    continueButton.addEventListener('click', function () {
+      var following = trainingOrder[trainingOrder.indexOf(currentLevel) + 1];
+      chooseLevel(step === 3 && following !== undefined ? following : 2);
+    });
+    levelPicker.addEventListener('change', function () { chooseLevel(Number(levelPicker.value)); });
+    next.addEventListener('click', function () { if (nextLevel >= 0) chooseLevel(nextLevel); });
+    function setMuted(value) {
+      muted = value;
+      mute.setAttribute('aria-pressed', muted);
+      setText(mute, muted ? 'Unmute' : 'Mute');
+      Module._WebAction(10, Number(muted));
+      try { localStorage.setItem('helldrop.muted', String(muted)); } catch (_) {}
+    }
+
+    pauseButton.addEventListener('click', function () { Module._WebAction(7, 0); });
+    doomcam.addEventListener('click', function () { Module._WebAction(11, 0); });
+    mute.addEventListener('click', function () { setMuted(!muted); });
+    follow.addEventListener('click', function () { Module._WebAction(8, 0); });
+    zoomIn.addEventListener('click', function () { Module._WebAction(9, 1); });
+    zoomOut.addEventListener('click', function () { Module._WebAction(9, -1); });
+
+    function canvasPoint(event) {
+      var rect = canvas.getBoundingClientRect();
+      return [(event.clientX - rect.left) / rect.width,
+              (event.clientY - rect.top) / rect.height];
+    }
+    var drag;
+    canvas.addEventListener('pointerdown', function (event) {
+      if (event.button !== 0 || !event.isPrimary) return;
+      drag = { id:event.pointerId, x:event.clientX, y:event.clientY, moved:false };
+      canvas.setPointerCapture(event.pointerId);
+    });
+    canvas.addEventListener('pointerup', function (event) {
+      if (!drag || drag.id !== event.pointerId) return;
+      if (!drag.moved) {
+        var point = canvasPoint(event);
+        if (point.every(value => value >= 0 && value <= 1)) Module._WebTap(...point);
+      }
+      drag = undefined;
+      if (event.pointerType === 'mouse') canvas.focus();
+    });
+    canvas.addEventListener('pointercancel', function (event) {
+      if (drag && drag.id === event.pointerId) drag = undefined;
+    });
+    canvas.addEventListener('pointermove', function (event) {
+      if (event.pointerType === 'mouse') Module._WebHover(...canvasPoint(event), 1);
+      if (!drag || event.pointerId !== drag.id) return;
+      var dx = event.clientX - drag.x, dy = event.clientY - drag.y;
+      if (!drag.moved && Math.hypot(dx, dy) < 7) return;
+      drag.moved = true;
+      drag.x = event.clientX;
+      drag.y = event.clientY;
+      if (!trainingOrder.includes(currentLevel)) {
+        var height = canvas.getBoundingClientRect().height;
+        Module._WebPan(dx / height, dy / height);
       }
     });
-    // Keep keyboard focus on the canvas when the player clicks into the game.
-    canvas.addEventListener('mousedown', function () { try { canvas.focus(); } catch (e) {} });
+    canvas.addEventListener('pointerleave', function () { Module._WebHover(0, 0, 0); });
+
+    function startGame() {
+      if (started || start.disabled) return;
+      started = true;
+      gate.hidden = true;
+      statusBox.hidden = true;
+      game.hidden = false;
+      canvas.focus();
+      Module._WebAction(0, 0);
+      setMuted(muted);
+    }
+    start.addEventListener('click', startGame);
+
+    async function loadModels() {
+      try {
+        var response = await fetch(Module.locateFile('models.pack'));
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        var pack = new Uint8Array(await response.arrayBuffer());
+        var view = new DataView(pack.buffer);
+        var decoder = new TextDecoder();
+        Module.FS.mkdirTree('/assets/models');
+        for (var offset = 0; offset < pack.length;) {
+          var nameLength = view.getUint32(offset, true);
+          var fileLength = view.getUint32(offset + 4, true);
+          offset += 8;
+          var file = decoder.decode(pack.subarray(offset, offset + nameLength));
+          offset += nameLength;
+          Module.FS.writeFile('/assets/models/' + file, pack.subarray(offset, offset + fileLength));
+          offset += fileLength;
+        }
+        Module._WebAction(6, 0);
+      } catch (error) {
+        console.warn('Optional 3D models could not load', error);
+      }
+    }
+
+    window.addEventListener('keydown', function (event) {
+      if (!started || event.target !== canvas) return;
+      var key = event.key.toLowerCase();
+      if (!event.repeat && key === 'g') { selectTool(0); Module._WebAction(1, 0); }
+      if (!event.repeat && key === 'u') { setMuted(!muted); event.preventDefault(); }
+      if (!event.repeat && key === 'p' && !pauseButton.disabled) Module._WebAction(7, 0);
+      if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key))
+        event.preventDefault();
+    });
   </script>
 
   {{{ SCRIPT }}}

@@ -220,11 +220,11 @@ int SimRandom(Sim *sim)
     return sim->rnd[sim->rndIndex];
 }
 
-static void RndInit(Sim *sim)
+static void RndInit(Sim *sim, uint32_t seed)
 {
-    // Fixed xorshift32 fill: P_Random's shape (bounded table, index state)
+    // Seeded xorshift32 fill: P_Random's shape (bounded table, index state)
     // without copying id's GPL byte table. Determinism is the contract.
-    unsigned x = 0x29A1D903u;
+    uint32_t x = seed ? seed : 0x29A1D903u;
     for (int i = 0; i < 256; i++) {
         x ^= x << 13; x ^= x >> 17; x ^= x << 5;
         sim->rnd[i] = (unsigned char)(x & 0xFF);
@@ -1458,6 +1458,7 @@ static void DgSetState(Sim *sim, DGState st, const char *reason)
         StateLogEnd();
     }
     sim->dg.state = st;
+    if (st == DG_EXITED || st == DG_DEAD) sim->dg.finishTic = sim->tic;
 }
 
 // Conservative "can he walk straight from a to b" test for route pruning.
@@ -1987,8 +1988,8 @@ static void DamageBarrel(Sim *sim, int idx, int dmg, int attackerMob)
     b->health -= dmg;
     if (b->health > 0) return;
     b->alive = false;
-    PushBoom(sim, BOOM_ROCKET, b->pos, b->z + 20.0f);
-    Snd(sim, SND_BAREXP, b->pos);
+    PushBoom(sim, BOOM_BARREL, b->pos, b->z + 20.0f);
+    Snd(sim, SND_BARREL_BLAST, b->pos);
     if (StateLogEnabled()) {
         StateLogBegin("barrel_explode");
         StateLogInt("tic", sim->tic);
@@ -3690,7 +3691,7 @@ static int SpawnMob(Sim *sim, MobKind kind, float x, float y, float angleDeg,
     bool onMap = false;
     float floorH = SimFloorAtPoint(sim, x, y, &onMap);
     if (!onMap) return -1;
-    if (playerDropped) Snd(sim, SND_TELEPT, (Vector2){ x, y });
+    if (playerDropped) Snd(sim, SND_SUMMON, (Vector2){ x, y });
     int idx;
     if (sim->mobCount < MOBS_MAX) {
         idx = sim->mobCount++;
@@ -3970,6 +3971,7 @@ void SimFree(Sim *sim)
     free(sim->tgTris);
     free(sim->tEdges);
     free(sim->tEdgeStart);
+    free(sim->tEdgeBlocked);
     free(sim->edges);
     free(sim->edgeStart);
     free(sim->bmLines);
@@ -3993,7 +3995,7 @@ bool SimInit(Sim *sim, const DoomMap *map, const LevelMesh *lm)
     memset(sim, 0, sizeof(*sim));
     sim->map = map;
     sim->lm = lm;
-    RndInit(sim);
+    RndInit(sim, g_tuning.seed);
     BuildTriGrid(sim);
 
     sim->lineUsed = (unsigned char *)calloc((size_t)map->lineCount, 1);

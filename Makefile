@@ -140,12 +140,14 @@ assets/freedoom2.wad:
 # Requires emscripten on PATH (emcc/emmake). Then:
 #   make web          # builds dist-web/index.{html,js,wasm,data}
 #   make web-serve    # builds, then serves dist-web/ on http://localhost:8000/
-# The shippable helldrop.wad is baked into the .data via --preload-file, so
+# The browser WAD is baked into the .data via --preload-file, so
 # the browser build is self-contained (Freedoom-based, legal to ship).
 WEBDIR       = dist-web
 MODEL_GLBS   = $(wildcard assets/models/*.glb)
 RAYLIB_WEB_A = $(RAYLIB_SRC)/src/libraylib.web.a
 WEBSHELL     = web/shell.html
+WEB_WAD      = build/helldrop-web.wad
+WEB_MODELS   = $(WEBDIR)/models.pack
 
 # GRAPHICS_API_OPENGL_ES3 pairs with WebGL 2 (the alpha-test sprite shader has
 # a matching GLSL ES 3.00 variant). USE_GLFW=3 is raylib's web windowing.
@@ -163,11 +165,11 @@ WEBLDFLAGS = -s USE_GLFW=3 \
              -s INITIAL_MEMORY=268435456 \
              -s STACK_SIZE=1048576 \
              -s ASYNCIFY \
-             --preload-file $(HELLDROP_WAD)@assets/helldrop.wad \
-             $(if $(MODEL_GLBS),--preload-file assets/models@assets/models) \
+             -s EXPORTED_RUNTIME_METHODS=FS \
+             --preload-file $(WEB_WAD)@assets/helldrop.wad \
              --shell-file $(WEBSHELL)
 
-web: $(WEBDIR)/index.html
+web: $(WEBDIR)/index.html $(WEB_MODELS)
 	@echo "Built $(WEBDIR)/index.html — serve with: make web-serve"
 
 $(WEBDIR):
@@ -181,10 +183,17 @@ $(RAYLIB_WEB_A): | $(RAYLIB_SRC)
 
 web-raylib: $(RAYLIB_WEB_A)
 
-$(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(HELLDROP_WAD) $(MODEL_GLBS) | $(WEBDIR)
+$(WEB_WAD): tools/web_assets.py $(HELLDROP_WAD)
+	mkdir -p $(@D)
+	python3 $< wad $(HELLDROP_WAD) $@
+
+$(WEB_MODELS): tools/web_assets.py $(MODEL_GLBS) | $(WEBDIR)
+	python3 $< models assets/models $@
+
+$(WEBDIR)/index.html: $(SRC) $(HDRS) $(RAYLIB_WEB_A) $(WEBSHELL) $(WEB_WAD) $(WEB_MODELS) | $(WEBDIR)
 	@command -v emcc >/dev/null || { echo "error: emcc not on PATH — activate emscripten (emsdk_env.sh)"; exit 1; }
 	emcc $(SRC) $(RAYLIB_WEB_A) $(WEBCFLAGS) $(WEBLDFLAGS) -o $@
-	@rev=$$(git rev-parse --short HEAD 2>/dev/null || date +%s); \
+	@rev=$$(shasum $(WEBDIR)/index.js $(WEBDIR)/index.wasm $(WEBDIR)/index.data $(WEB_MODELS) | shasum | cut -c1-12); \
 	  sed -i '' -e "s/HELLDROP_REV/$$rev/g" -e "s/src=index.js>/src=index.js?v=$$rev>/" -e "s/src=\"index.js\"/src=\"index.js?v=$$rev\"/" $@; \
 	  echo "web build stamped v=$$rev"
 
@@ -205,4 +214,7 @@ distclean: clean
 test: game
 	./tools/playtest.sh
 
-.PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean test
+test-web: web
+	node tools/web_playtest.mjs
+
+.PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean test test-web

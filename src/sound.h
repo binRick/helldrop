@@ -23,6 +23,7 @@ bool GameAudioLoad(GameAudio *ga, const Wad *wad);   // needs InitAudioDevice
 void GameAudioUnload(GameAudio *ga);
 // Play new sim sound events; listener is the camera target (doom coords).
 void GameAudioDrain(GameAudio *ga, const Sim *sim, Vector2 listener);
+void GameAudioBarrelReady(GameAudio *ga);
 // --dump-frames: write snd/<lump>.wav and sound.txt ("seconds lump gain").
 bool GameAudioCaptureOpen(GameAudio *ga, const Wad *wad, const char *dir);
 

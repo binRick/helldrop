@@ -2,6 +2,7 @@
 #define HELLDROP_SIM_H
 
 #include <stdbool.h>
+#include <stdint.h>
 #include "raylib.h"
 #include "map.h"
 #include "levelmesh.h"
@@ -172,6 +173,7 @@ typedef enum SimSnd {
     SND_VILATK, SND_FLAMST, SND_SLOP,
     SND_RLAUNC, SND_BAREXP,
     SND_PSTART, SND_PSTOP,
+    SND_SUMMON, SND_BARREL_BLAST, SND_BARREL_READY,
     SND_COUNT
 } SimSnd;
 
@@ -196,7 +198,7 @@ typedef struct Proj {
 
 // Explosion flash for the renderer (deterministic sim data, cosmetic only).
 typedef enum BoomKind {
-    BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL, BOOM_TRACER, BOOM_BARONBALL
+    BOOM_ROCKET, BOOM_IMPBALL, BOOM_CACOBALL, BOOM_TRACER, BOOM_BARONBALL, BOOM_BARREL
 } BoomKind;
 
 typedef struct Boom {
@@ -259,6 +261,7 @@ typedef struct DoomGuy {
     DGWeapon weapon;
     int fireCooldown;
     long deathTic;          // when he died; drives the death animation
+    long finishTic;         // fixed time of death or exit for results
     int targetMob;          // current fight target, -1 none
     float strafeDir;        // +1/-1 orbit direction in FIGHT
     int noTargetTics;
@@ -357,10 +360,11 @@ typedef struct Sim {
     int rndIndex;
 } Sim;
 
-// Balance knobs for the map's native population (the "garrison").
+// Repeatability and balance settings for a match.
 typedef struct SimTuning {
     unsigned garrisonSkillBit;   // THINGS skill flag: 1 easy, 2 medium, 4 hard
     int garrisonDmgPct;          // native monsters' damage to him, percent
+    uint32_t seed;              // zero uses the original deterministic seed
 } SimTuning;
 void SimSetTuning(SimTuning t);
 SimTuning SimGetTuning(void);

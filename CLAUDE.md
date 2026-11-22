@@ -11,21 +11,17 @@ Full design rationale and roadmap: `DESIGN.md`.
   `assets/freedoom1.wad` (BSD-licensed IWAD). No Homebrew deps.
 - raylib is pinned via `RAYLIB_TAG` in the Makefile; upgrade = bump tag +
   `rm -rf vendor/raylib-src`.
-- **Web build** (`make web`, needs Emscripten/`emcc` on PATH): cross-compiles
-  the same portable-C sources to WebAssembly + WebGL2 into `dist-web/`
-  (`index.{html,js,wasm,data}`), preloading `assets/helldrop.wad` and the
-  `web/shell.html` start gate. `make web-raylib` builds `libraylib.web.a`
-  once. On `PLATFORM_WEB` `main()` swaps its blocking loop for
-  `emscripten_set_main_loop` (state hoisted to file scope), forces a single
-  fully-unlocked level (no save/log), and links with `-sASYNCIFY` (raylib's
-  WebAudio init spins on `emscripten_sleep`). `make web-serve` serves it on
-  :8000. Deployed at **helldrop.ximg.app** (artifacts copied into ximg-web's
-  `helldrop-html/game/`).
-- **On every new release, rebuild the web build and refresh it on the site** —
-  `make web` then copy `dist-web/index.{html,js,wasm,data}` into ximg-web's
-  `helldrop-html/game/`, commit, and deploy. The live wasm does NOT update on
-  its own; releasing without this leaves helldrop.ximg.app on the old build.
-  Full procedure: ximg-web's `CLAUDE.md` → *WebAssembly Apps → Helldrop*.
+- **Web build** (`make web`, needs Emscripten and Python on PATH):
+  cross-compiles to WebAssembly + WebGL2 into `dist-web/`. The preload WAD
+  includes the seven training lessons and Episode 1. The optional
+  `models.pack` downloads when the player enters Episode 1. `make web-serve`
+  serves on port 8000. `make test-web` requires Node.js 22+ and Chrome to run
+  desktop and touch regression tests.
+- **On every new release, rebuild and publish all five browser artifacts**.
+  Copy `dist-web/index.{html,js,wasm,data}` and `dist-web/models.pack` into
+  ximg-web's `helldrop-html/game/`, then follow its release procedure in
+  `CLAUDE.md` under *WebAssembly Apps → Helldrop*. The live build at
+  helldrop.ximg.app updates through that release process.
 - Builds `Helldrop.app` (minimal bundle: Info.plist + icon.icns from
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —

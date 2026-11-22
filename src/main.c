@@ -1,5 +1,6 @@
 // Helldrop entry point: isometric Doom-level viewer loop.
 
+#include <errno.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ typedef struct Options {
     long simOnly;          // --simonly <tics>: headless match, prints outcome JSON
     bool viewer;           // --viewer: model gallery (dev mode), screenshot with --selftest
     int winW, winH;        // --size WxH (trailer capture at 1920x1080)
+    uint32_t seed;
     int garrisonSkill;     // --garrison-skill <1|2|4>: map-thing skill bit (balance)
     int garrisonDmg;       // --garrison-dmg <pct>: native monster damage (balance)
 } Options;
@@ -110,12 +112,15 @@ static void UpdateDynamicLights(const Sim *sim, float alpha)
     Vector4 pos[MAX_LIGHTS];
     Vector3 col[MAX_LIGHTS];
     int n = 0;
-    for (int i = 0; i < BOOMS_MAX; i++) {   // blasts first: the brightest
+    for (int i = 0; i < sim->boomHead && i < BOOMS_MAX; i++) {   // blasts first: the brightest
         const Boom *b = &sim->booms[i];
         long age = sim->tic - b->tic;
-        if (b->tic == 0 || age < 0 || age > 11) continue;
-        float k = 1.8f*(1.0f - (float)age/12.0f);
-        AddLight(pos, col, &n, (Vector3){ b->pos.x, b->z + 24.0f, -b->pos.y }, 260.0f,
+        if (age < 0 || age > 11) continue;
+        bool barrel = b->kind == BOOM_BARREL;
+        float fade = 1.0f - ((float)age + alpha)/12.0f;
+        float k = barrel ? 3.5f*fade*fade : 1.8f*fade;
+        AddLight(pos, col, &n, (Vector3){ b->pos.x, b->z + 24.0f, -b->pos.y },
+                 barrel ? 340.0f : 260.0f,
                  1.0f, 0.62f, 0.25f, k);
     }
     for (int i = 0; i < PROJS_MAX; i++) {
@@ -207,7 +212,7 @@ static void PrintUsage(FILE *out)
 {
     fprintf(out,
         "usage: helldrop [--wad <path>] [--map <name>] [--no-log]\n"
-        "                [--selftest] [--exit-after <N>] [--turbo <N>] [--autodrop]\n"
+        "                [--selftest] [--exit-after <N>] [--turbo <N>] [--seed <N>] [--autodrop]\n"
         "                [--dump-frames <dir>] [--dump-every <N>]\n");
 }
 
@@ -229,6 +234,7 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     opt->viewer = false;
     opt->winW = 1600;
     opt->winH = 900;
+    opt->seed = 0;
     opt->garrisonSkill = -1;
     opt->garrisonDmg = -1;
 
@@ -260,6 +266,14 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
             char *end = NULL;
             opt->simOnly = strtol(argv[++i], &end, 10);
             if (end == argv[i] || *end != '\0' || opt->simOnly <= 0) return false;
+        } else if (strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
+            const char *value = argv[++i];
+            char *end = NULL;
+            errno = 0;
+            if (value[0] < '0' || value[0] > '9') return false;
+            unsigned long long seed = strtoull(value, &end, 10);
+            if (errno || *end || seed > UINT32_MAX) return false;
+            opt->seed = (uint32_t)seed;
         } else if (strcmp(argv[i], "--garrison-skill") == 0 && i + 1 < argc) {
             opt->garrisonSkill = atoi(argv[++i]);
             if (opt->garrisonSkill < 1 || opt->garrisonSkill > 4) return false;
@@ -648,10 +662,10 @@ static void DrawProjectiles(const Sim *sim, float alpha, const GameSprites *gs,
 
 static void DrawBooms(const Sim *sim, const GameSprites *gs, Camera3D cam)
 {
-    for (int i = 0; i < BOOMS_MAX; i++) {
+    for (int i = 0; i < sim->boomHead && i < BOOMS_MAX; i++) {
         const Boom *b = &sim->booms[i];
         long age = sim->tic - b->tic;
-        if (b->tic == 0 || age < 0 || age > 11) continue;
+        if (age < 0 || age > 11) continue;
         const SpriteFrame *f = gs->valid
                                    ? BoomSpriteFrame(gs, (BoomKind)b->kind, age)
                                    : NULL;
@@ -1413,26 +1427,19 @@ static void DrawIntermission(const DoomMap *map, const Sim *sim,
     Color tcol = won ? (Color){ 90, 255, 110, 255 } : (Color){ 255, 60, 50, 255 };
     DrawTextShadowed(title, cx - MeasureText(title, 40)/2, cy - 116, 40, tcol);
 
-    int secs = (int)(sim->tic/SIM_TICRATE);
+    int secs = (int)(sim->dg.finishTic/SIM_TICRATE);
     int par = ParSeconds(map->name);
-    int total = 0;
-    for (int i = 0; i < sim->mobCount; i++) {
-        total += sim->mobs[i].playerDropped ? 0 : 1;
-    }
-    int pct = (total > 0) ? (int)(sim->kills*100/total) : 0;
     const char *lines[5];
     lines[0] = (par > 0)
         ? TextFormat("TIME %d:%02d   (PAR %d:%02d%s)", secs/60, secs%60,
                      par/60, par%60,
                      (secs > par) ? TextFormat("  +%ds over", secs - par) : "")
         : TextFormat("TIME %d:%02d", secs/60, secs%60);
-    lines[1] = TextFormat("HIS KILLS  %ld  (%d%% of the level's demons)",
-                          sim->kills, pct);
+    lines[1] = TextFormat("DEMONS HE KILLED  %ld", sim->kills);
     lines[2] = TextFormat("HIS BLOOD  %ld damage taken", sim->dgDamageTaken);
     lines[3] = TextFormat("YOUR HAND  %d drops   %ld souls spent",
                           sim->dropsMade, sim->soulsSpent);
-    lines[4] = won ? "LEVEL COMPLETION: 0%   rip and torn"
-                   : "press G for the Performance Improvement Plan";
+    lines[4] = TextFormat("MARINE HEALTH  %d%%", sim->dg.health);
     int y = cy - 56;
     for (int i = 0; i < 5; i++) {
         Color c = (i == 4) ? (Color){ 255, 200, 120, 255 } : LIGHTGRAY;
@@ -1507,7 +1514,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
 
     y += 20;
     DrawTextShadowed("WASD pan  RMB drag  wheel zoom  Q/E rotate  Z/X tilt  "
-                     "R view  TAB codex  C doomcam  G restart  ESC quit",
+                     "R view  TAB codex  C doomcam  U mute  P pause  G restart  ESC quit",
                      12, y, 14, GRAY);
     y += 18;
     DrawTextShadowed(TextFormat("HELL'S HAND:  F slam door %d / recall lift %d"
@@ -1780,9 +1787,9 @@ static void DrawStatusBar(const DoomHud *hud, const Sim *sim, const FaceState *f
 }
 
 // Where the mouse points on the level floors, in Doom map coords.
-static bool MouseGroundPoint(const LevelMesh *lm, Camera3D cam, Vector2 *out)
+static bool ScreenGroundPoint(const LevelMesh *lm, Camera3D cam, Vector2 screen, Vector2 *out)
 {
-    Ray ray = GetScreenToWorldRay(GetMousePosition(), cam);
+    Ray ray = GetScreenToWorldRay(screen, cam);
     RayCollision rc = GetRayCollisionMesh(ray, lm->floors, MatrixIdentity());
     if (!rc.hit) return false;
     out->x = rc.point.x;
@@ -1808,6 +1815,7 @@ static GameSprites gsprites;
 static GameAudio gaudio;
 static long frame;
 static double simAcc;
+static bool paused, muted;
 static MobKind selectedKind = MK_PINKY;
 static char dropMsg[64];
 static int dropMsgFrames;
@@ -1827,6 +1835,195 @@ static void AutodropTick(Sim *simp);
 static void MainCleanup(void);
 #ifdef PLATFORM_WEB
 static void HelldropFrameWeb(void);
+
+static bool webHover;
+static Vector2 webHoverPosition;
+static bool webStarted, webRetry, webTap, webBlast, webModelsReady;
+static bool webModelsRequested, webPause, webFollow, webDoomcam;
+static int webMute = -1;
+enum {
+    TRAIN_BARREL = 0, TRAIN_CHAIN = 1,
+    TRAIN_FIRST = 11, TRAIN_SHADOW, TRAIN_DOOR, TRAIN_CROSSFIRE, TRAIN_GAUNTLET
+};
+
+static int webLevelRequest = -1;
+static int webLevel = TRAIN_FIRST;
+static Vector2 webPan;
+static float webZoom;
+static int webPick = -1;
+static int webTool;
+static Vector2 webTapPosition;
+static bool webAmbush = true;
+static bool ambushReady, trainingDoorUsed;
+static int trainingDrops;
+static bool trainingCleared;
+
+typedef struct TrainingLesson {
+    const char *map;
+    int health, souls, drops;
+    bool door;
+    Vector2 spots[2];
+} TrainingLesson;
+
+static const TrainingLesson training[] = {
+    [TRAIN_BARREL] = { "AMBUSH", 65, 75, 1, false, {{ 370, 154 }} },
+    [TRAIN_CHAIN] = { "CHAIN", 65, 75, 1, false, {{ 370, 154 }} },
+    [TRAIN_FIRST] = { "FIRST", 8, 35, 1, false, {{ 460, 128 }} },
+    [TRAIN_SHADOW] = { "SHADOW", 100, 22, 1, false, {{ 304, 96 }} },
+    [TRAIN_DOOR] = { "HOLD", 12, 55, 1, true, {{ 305, 104 }} },
+    [TRAIN_CROSSFIRE] = { "CROSSFIR", 42, 55, 2, false, {{ 306, 58 }, { 306, 133 }} },
+    [TRAIN_GAUNTLET] = { "GAUNTLET", 80, 95, 2, true, {{ 372, 151 }, { 451, 143 }} },
+};
+
+static bool TrainingPlaced(void)
+{
+    return trainingDrops >= training[webLevel].drops;
+}
+static int ambushBlastDamage, ambushBlastCount;
+
+
+EM_JS(void, WebReady, (int width, int height), { setupGame(width, height); });
+EM_JS(void, WebAddDemon, (int kind, const char *name, int cost), {
+    addDemon(kind, UTF8ToString(name), cost);
+});
+EM_JS(void, WebStatus, (int stage, int kind, int souls, int health, int near, int mode, int blastDamage, int level, int stopped, int chain), {
+    updateGame(stage, kind, souls, health, near, mode, blastDamage, level, stopped, chain);
+});
+EM_JS(void, WebLoadModels, (void), { loadModels(); });
+EM_JS(void, WebEpisodeStatus, (int next, int ticks, int barrelCooldown, int doorCooldown), {
+    updateEpisode(next, ticks, barrelCooldown, doorCooldown);
+});
+EM_JS(void, WebNotice, (const char *message), { setNotice(UTF8ToString(message)); });
+
+enum { WEB_START, WEB_RETRY, WEB_CONTINUE, WEB_PICK, WEB_TOOL, WEB_BLAST, WEB_MODELS,
+       WEB_PAUSE, WEB_FOLLOW, WEB_ZOOM, WEB_MUTE, WEB_DOOMCAM };
+EMSCRIPTEN_KEEPALIVE void WebAction(int action, int value)
+{
+    switch (action) {
+    case WEB_START: webStarted = true; break;
+    case WEB_RETRY: webRetry = true; break;
+    case WEB_CONTINUE: webLevelRequest = value; break;
+    case WEB_PICK: webPick = value; webTool = 0; break;
+    case WEB_TOOL: webTool = value; break;
+    case WEB_BLAST: webBlast = true; break;
+    case WEB_MODELS: webModelsReady = true; break;
+    case WEB_PAUSE: webPause = true; break;
+    case WEB_FOLLOW: webFollow = true; break;
+    case WEB_ZOOM: webZoom += value; break;
+    case WEB_MUTE: webMute = value; break;
+    case WEB_DOOMCAM: webDoomcam = true; break;
+    }
+}
+
+EMSCRIPTEN_KEEPALIVE void WebTap(float x, float y)
+{
+    webTap = true;
+    webTapPosition = (Vector2){ x, y };
+}
+
+EMSCRIPTEN_KEEPALIVE void WebHover(float x, float y, int visible)
+{
+    webHover = visible;
+    webHoverPosition = (Vector2){ x, y };
+}
+
+EMSCRIPTEN_KEEPALIVE void WebPan(float x, float y)
+{
+    webPan.x += x;
+    webPan.y += y;
+}
+
+static void UpdateWebCamera(void)
+{
+    if (webFollow) {
+        vs.follow = true;
+        vs.fovy = FOLLOW_FOVY;
+    }
+    if (webZoom != 0.0f) vs.fovy = Clamp(vs.fovy*powf(0.85f, webZoom), FOVY_MIN, FOVY_MAX);
+    if (webPan.x != 0.0f || webPan.y != 0.0f) {
+        vs.follow = false;
+        float yaw = vs.yawDeg*DEG2RAD;
+        Vector3 right = { cosf(yaw), 0.0f, -sinf(yaw) };
+        Vector3 forward = { -sinf(yaw), 0.0f, -cosf(yaw) };
+        vs.target = Vector3Add(vs.target, Vector3Scale(right, -webPan.x*vs.fovy));
+        vs.target = Vector3Add(vs.target, Vector3Scale(forward,
+                                   webPan.y*vs.fovy/sinf(vs.pitchDeg*DEG2RAD)));
+    }
+    webPan = (Vector2){ 0 };
+    webZoom = 0;
+    webFollow = false;
+}
+
+static void FrameAmbush(void)
+{
+    float aspect = (float)GetScreenWidth()/GetScreenHeight();
+    // Look along the corridor on tall screens so both rooms fit.
+    vs.yawDeg = aspect < 1.0f ? 72.0f : 45.0f;
+    vs.pitchDeg = 62.0f;
+    float yaw = vs.yawDeg*DEG2RAD;
+    float width = map.maxX - map.minX;
+    float depth = map.maxY - map.minY;
+    float horizontal = width*cosf(yaw) + depth*sinf(yaw);
+    float vertical = (width*sinf(yaw) + depth*cosf(yaw))*sinf(vs.pitchDeg*DEG2RAD);
+    vs.target.y = 30.0f;
+    vs.fovy = fmaxf((horizontal + 44.0f)/aspect, vertical + 104.0f);
+}
+
+static void ResetAmbush(void)
+{
+    const TrainingLesson *lesson = &training[webLevel];
+    sim.souls = (float)lesson->souls;
+    sim.dg.health = lesson->health;
+    trainingDrops = 0;
+    trainingCleared = false;
+    trainingDoorUsed = false;
+    ambushReady = false;
+    ambushBlastDamage = -1;
+    ambushBlastCount = 0;
+    selectedKind = webLevel >= TRAIN_FIRST && webLevel < TRAIN_GAUNTLET ? MK_SHOTGUNGUY : MK_IMP;
+    unlocked = webLevel < TRAIN_FIRST ? (1u << MK_IMP) | (1u << MK_SHOTGUNGUY)
+                                     : 1u << selectedKind;
+    doomcamOn = false;
+    ViewReset(&vs);
+}
+
+static bool AmbushNearBarrel(void)
+{
+    return sim.barrelCount > 0 && sim.barrels[0].alive &&
+           Vector2Distance(sim.dg.pos, sim.barrels[0].pos) < 72.0f;
+}
+
+static bool SwitchWebLevel(int level)
+{
+    if (level < 0 || level >= (int)(sizeof(training)/sizeof(training[0]))) return true;
+    webAmbush = training[level].map != NULL;
+    if (webAmbush) snprintf(curMap, sizeof(curMap), "%s", training[level].map);
+    else snprintf(curMap, sizeof(curMap), "E1M%d", level - 1);
+    if (!ReloadLevel(&wad, curMap, &map, &lm, &sim, &thingHeights)) return false;
+    webLevel = level;
+    SetupView(&vs, &map);
+    unlocked = 0xFFFFFFFFu;
+    doomcamOn = true;
+    if (webAmbush) ResetAmbush();
+    else if (!webModelsRequested) {
+        webModelsRequested = true;
+        WebLoadModels();
+    }
+    gaudio.cursor = 0;
+    dropMsgFrames = 0;
+    simAcc = 0;
+    paused = false;
+    codexOpen = false;
+    intentPrev[0] = '\0';
+    memset(mobYawInit, 0, sizeof(mobYawInit));
+    webTap = webBlast = webFollow = false;
+    webPick = -1;
+    webTool = 0;
+    webPan = (Vector2){ 0 };
+    webZoom = 0;
+    return true;
+}
+
 #endif
 
 int main(int argc, char **argv)
@@ -1837,10 +2034,10 @@ int main(int argc, char **argv)
     }
 
 #ifdef PLATFORM_WEB
-    // The web build takes no CLI args: run a single, fully-unlocked level (the
-    // most immediately playable demo) from our shippable WAD, and skip the
-    // on-disk debug log — the browser has no writable working directory.
-    opt.mapExplicit = true;          // single level -> everything unlocked
+    // Start with the authored ambush before offering the full E1M1 demo.
+    // Browser sessions have no writable working directory for debug logs.
+    opt.mapName = training[webLevel].map;
+    opt.mapExplicit = true;
     opt.noLog = true;
     opt.wadPath = "assets/helldrop.wad";
     opt.wadExplicit = true;          // no IWAD auto-detection on web
@@ -1850,6 +2047,7 @@ int main(int argc, char **argv)
         SimTuning tn = SimGetTuning();
         if (opt.garrisonSkill > 0) tn.garrisonSkillBit = (unsigned)opt.garrisonSkill;
         if (opt.garrisonDmg > 0) tn.garrisonDmgPct = opt.garrisonDmg;
+        tn.seed = opt.seed;
         SimSetTuning(tn);
     }
     if (!opt.noLog && !StateLogOpen(NULL)) {
@@ -1993,6 +2191,7 @@ int main(int argc, char **argv)
     if (!GameSpritesLoad(&gsprites, &wad)) {
         TraceLog(LOG_WARNING, "MAIN: no sprites in WAD, using shape renderer");
     }
+#ifndef PLATFORM_WEB
     {
         const char *mdir = getenv("HELLDROP_MODEL_DIR");
         if (GameModelsLoad(&gmodels, mdir ? mdir : "assets/models")) {
@@ -2003,6 +2202,7 @@ int main(int argc, char **argv)
             TraceLog(LOG_INFO, "MAIN: 3D models loaded (M toggles sprites)");
         }
     }
+#endif
     if (opt.viewer) {
         // Dev mode: every model on a floor under the iso camera, cycling
         // clips (idle/walk/attack/pain/death per row), depth-tested against
@@ -2035,6 +2235,7 @@ int main(int argc, char **argv)
             EndMode3D();
             if (!opt.dumpVideo) DrawText(TextFormat("--viewer  clip: %s", CLIPN[clip]), 12, 12, 24, RAYWHITE);
             EndDrawing();
+#ifndef PLATFORM_WEB
             if (opt.dumpVideo) {
                 static FILE *vp;
                 Image shot = LoadImageFromScreen();
@@ -2049,6 +2250,7 @@ int main(int argc, char **argv)
                 UnloadImage(shot);
                 if (opt.exitAfter > 0 && f + 1 >= opt.exitAfter) { if (vp) pclose(vp); break; }
             }
+#endif
             if (opt.selftest && f >= ((opt.exitAfter > 0) ? opt.exitAfter : 60)) {
                 TakeScreenshot("selftest.png");
                 break;
@@ -2083,6 +2285,11 @@ int main(int argc, char **argv)
     SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
 
 #ifdef PLATFORM_WEB
+    howtoFrames = 0;
+    ResetAmbush();
+    for (int i = 0; i < MK_COUNT; i++)
+        WebAddDemon(i, MobKindName((MobKind)i), SimDropBaseCost((MobKind)i));
+    WebReady(GetScreenWidth(), GetScreenHeight());
     // requestAnimationFrame-driven (fps=0); simulate_infinite_loop=1 means this
     // never returns and the browser owns the frame cadence.
     emscripten_set_main_loop(HelldropFrameWeb, 0, 1);
@@ -2141,7 +2348,62 @@ static bool HelldropFrame(void)
         frameWorkStart = GetTime();
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
+#ifdef PLATFORM_WEB
+        bool retry = webRetry;
+        bool togglePause = webPause;
+#else
+        bool retry = IsKeyPressed(KEY_G);
+        bool togglePause = IsKeyPressed(KEY_P);
+#endif
+        bool placed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        bool slam = IsKeyPressed(KEY_F);
+        bool blast = IsKeyPressed(KEY_V);
+        bool toggleDoomcam = IsKeyPressed(KEY_C);
+#ifdef PLATFORM_WEB
+        int muteRequest = -1;
+#else
+        int muteRequest = IsKeyPressed(KEY_U) ? !muted : -1;
+#endif
+        Vector2 pointer = GetMousePosition();
+#ifdef PLATFORM_WEB
+        if (!webStarted) return true;
+        if (webLevelRequest >= 0) {
+            if (!SwitchWebLevel(webLevelRequest)) return false;
+            webLevelRequest = -1;
+        }
+        webPause = false;
+        toggleDoomcam |= webDoomcam;
+        webDoomcam = false;
+        if (webMute >= 0) muteRequest = webMute;
+        webMute = -1;
+        if (webModelsReady) {
+            webModelsReady = false;
+            if (GameModelsLoad(&gmodels, "assets/models")) {
+                locMdlCount = GetShaderLocation(gmodels.shader, "lightCount");
+                locMdlPos = GetShaderLocation(gmodels.shader, "lightPos");
+                GameModelsRenderPortraits(&gmodels);
+            }
+        }
+        webRetry = false;
+        if (retry) { webTap = false; webBlast = false; }
+        if (webTap || webHover) {
+            Vector2 normalized = webTap ? webTapPosition : webHoverPosition;
+            pointer = (Vector2){ normalized.x * GetScreenWidth(),
+                                 normalized.y * GetScreenHeight() };
+        }
+        bool tapped = webTap;
+        placed = webTap && webTool == 0 && (!webAmbush || !TrainingPlaced());
+        slam |= webTap && webTool == 1;
+        blast |= webTap && webTool == 2;
+        webTap = false;
+        if (webAmbush) FrameAmbush();
+        else {
+            CameraUpdate(&vs, dt);
+            UpdateWebCamera();
+        }
+#else
         CameraUpdate(&vs, dt);
+#endif
         if (vs.follow) {
             Vector3 want = { sim.dg.pos.x, sim.dg.z, -sim.dg.pos.y };
             float k = 1.0f - expf(-dt*5.0f);   // smooth, frame-rate independent
@@ -2152,13 +2414,29 @@ static bool HelldropFrame(void)
             howtoFrames--;
             if (GetKeyPressed() != 0 || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) howtoFrames = 0;
         }
-        Camera3D cam = CameraFromView(&vs);
-
-        if (IsKeyPressed(KEY_G)) {
+        bool finished = sim.dg.state == DG_DEAD || sim.dg.state == DG_EXITED ||
+                        sim.dg.state == DG_NO_GOAL;
+#ifdef PLATFORM_WEB
+        finished |= webAmbush && trainingCleared;
+#endif
+        if (togglePause && !finished) paused = !paused;
+        if (retry) {
+            paused = finished = false;
             LogInput("sim_restart");
+#ifdef PLATFORM_WEB
+            if (!webAmbush) MeltStart(&melt);
+#else
             MeltStart(&melt);
+#endif
             SimFree(&sim);
-            SimInit(&sim, &map, &lm);
+            if (!SimInit(&sim, &map, &lm)) return false;
+            gaudio.cursor = 0;
+            dropMsgFrames = 0;
+#ifdef PLATFORM_WEB
+            if (webAmbush) ResetAmbush();
+            else SetupView(&vs, &map);
+            webTool = 0;
+#endif
             simAcc = 0.0;
             memset(mobYawInit, 0, sizeof(mobYawInit));
         }
@@ -2174,9 +2452,16 @@ static bool HelldropFrame(void)
         if (IsKeyPressed(KEY_EIGHT)) wantKind = MK_BARON;
         if (IsKeyPressed(KEY_NINE))  wantKind = MK_ARCHVILE;
         if (IsKeyPressed(KEY_ZERO))  wantKind = MK_SPECTRE;
-        if (wantKind >= 0) {
+#ifdef PLATFORM_WEB
+        if (webPick >= 0) wantKind = webPick;
+        webPick = -1;
+#endif
+        if (wantKind >= 0 && wantKind < MK_COUNT) {
             if (unlocked & (1u << wantKind)) {
                 selectedKind = (MobKind)wantKind;
+#ifdef PLATFORM_WEB
+                webTool = 0;
+#endif
             } else {
                 snprintf(dropMsg, sizeof(dropMsg), "%s ARRIVES ON %s",
                          MobKindName((MobKind)wantKind),
@@ -2226,17 +2511,57 @@ static bool HelldropFrame(void)
             gmodels.enabled = !gmodels.enabled;
             LogInput(gmodels.enabled ? "models_on" : "models_off");
         }
-        if (IsKeyPressed(KEY_C)) {
+        if (muteRequest >= 0) {
+            muted = muteRequest;
+            if (IsAudioDeviceReady()) SetMasterVolume(muted ? 0.0f : 1.0f);
+        }
+        if (toggleDoomcam) {
             doomcamOn = !doomcamOn;
             LogInput(doomcamOn ? "doomcam_on" : "doomcam_off");
         }
 
+        Camera3D cam = CameraFromView(&vs);
         Vector2 ground = { 0 };
-        bool groundOk = MouseGroundPoint(&lm, cam, &ground);
-        if (groundOk && IsKeyPressed(KEY_F)) {
+        bool groundOk = ScreenGroundPoint(&lm, cam, pointer, &ground);
+#ifdef PLATFORM_WEB
+        if (webAmbush) {
+            const TrainingLesson *lesson = &training[webLevel];
+            slam = TrainingPlaced() && lesson->door && !trainingDoorUsed && (slam || webTool == 1);
+            if (slam) {
+                ground = (Vector2){ 240, 96 };
+                groundOk = true;
+                webTool = 0;
+            }
+            if (TrainingPlaced() && groundOk && sim.barrelCount > 0 &&
+                Vector2Distance(ground, sim.barrels[0].pos) < 34.0f)
+                blast |= tapped;
+            if (webBlast && TrainingPlaced() && sim.barrelCount > 0) {
+                ground = sim.barrels[0].pos;
+                groundOk = true;
+                blast = true;
+            }
+            if (!TrainingPlaced()) blast = false;
+            if (placed && webLevel >= TRAIN_FIRST && groundOk) {
+                Vector2 spot = lesson->spots[trainingDrops];
+                if (Vector2Distance(ground, spot) <= 47.0f) ground = spot;
+                else groundOk = false;
+            }
+            if (placed && (!groundOk || ground.x < 264)) {
+                snprintf(dropMsg, sizeof(dropMsg), "%s", webLevel >= TRAIN_FIRST ? "TAP THE MARKED RING" : "AIM PAST THE DOOR");
+                dropMsgFrames = 80;
+                placed = false;
+            }
+        }
+        webBlast = false;
+#endif
+        if (!paused && !finished && groundOk && slam) {
             int cost = 0;
             switch (SimSlamMover(&sim, ground.x, ground.y, &cost)) {
-            case VERB_OK: break;
+            case VERB_OK:
+#ifdef PLATFORM_WEB
+                if (webAmbush) trainingDoorUsed = true;
+#endif
+                break;
             case VERB_NO_SOULS:
                 snprintf(dropMsg, sizeof(dropMsg), "NOT ENOUGH SOULS (%d)", cost);
                 dropMsgFrames = 80;
@@ -2251,9 +2576,20 @@ static bool HelldropFrame(void)
                 break;
             }
         }
-        if (groundOk && IsKeyPressed(KEY_V)) {
+        if (!paused && !finished && groundOk && blast) {
+#ifdef PLATFORM_WEB
+            long damageBefore = sim.dgDamageTaken;
+            int blastsBefore = sim.boomHead;
+#endif
             switch (SimDetonateBarrel(&sim, ground.x, ground.y)) {
-            case VERB_OK: break;
+            case VERB_OK:
+#ifdef PLATFORM_WEB
+                if (webAmbush) {
+                    ambushBlastDamage = sim.dgDamageTaken - damageBefore;
+                    ambushBlastCount = sim.boomHead - blastsBefore;
+                }
+#endif
+                break;
             case VERB_NO_SOULS:
                 snprintf(dropMsg, sizeof(dropMsg), "NOT ENOUGH SOULS (%d)",
                          VERB_BARREL_COST);
@@ -2269,9 +2605,18 @@ static bool HelldropFrame(void)
                 break;
             }
         }
-        if (groundOk && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+        if (!paused && !finished && groundOk && placed) {
             switch (SimTryDrop(&sim, selectedKind, ground.x, ground.y)) {
             case DROP_OK:
+#ifdef PLATFORM_WEB
+                if (webAmbush) {
+                    trainingDrops++;
+                    if (webLevel == TRAIN_CROSSFIRE && !TrainingPlaced()) {
+                        selectedKind = MK_IMP;
+                        unlocked = 1u << MK_IMP;
+                    }
+                }
+#endif
                 break;
             case DROP_NO_SOULS:
                 snprintf(dropMsg, sizeof(dropMsg), "NOT ENOUGH SOULS");
@@ -2294,7 +2639,12 @@ static bool HelldropFrame(void)
         // we ignore wall time entirely and advance exactly `turbo` tics per
         // rendered frame, so captured footage is smooth and reproducible
         // (per-frame PNG export would otherwise balloon dt).
-        simAcc += opt.dumpDir ? SIM_TICTIME * (double)opt.turbo
+#ifdef PLATFORM_WEB
+        if (webAmbush && (trainingCleared || !TrainingPlaced() ||
+                          (training[webLevel].door && !trainingDoorUsed))) dt = 0;
+        if (webAmbush && AmbushNearBarrel()) dt *= 0.4f;
+#endif
+        if (!paused) simAcc += opt.dumpDir ? SIM_TICTIME * (double)opt.turbo
                               : (double)dt * (double)opt.turbo;
         if (simAcc > 0.5) simAcc = 0.5;
         while (simAcc >= SIM_TICTIME) {
@@ -2312,6 +2662,50 @@ static bool HelldropFrame(void)
         // fullscreen for the death takeover).
         long deathAge = (sim.dg.state == DG_DEAD) ? (sim.tic - sim.dg.deathTic) : -1;
         bool takeover = (deathAge >= 0 && deathAge < 140);
+#ifdef PLATFORM_WEB
+        if (webAmbush) {
+            takeover = false;
+            bool ready = sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED &&
+                         TrainingPlaced() && AmbushNearBarrel();
+            if (ready && !ambushReady && !paused) GameAudioBarrelReady(&gaudio);
+            ambushReady = ready;
+            // The first two lessons reward the setup itself. Crossfire
+            // requires both summons and a hit; the other encounters require a kill.
+            if ((webLevel == TRAIN_FIRST && sim.mobCount > 0) ||
+                (webLevel == TRAIN_SHADOW && sim.mobCount > 0 && sim.tic >= 35) ||
+                (webLevel == TRAIN_CROSSFIRE && TrainingPlaced() && sim.dgDamageTaken > 0)) {
+                trainingCleared = true;
+            }
+            int stage = trainingCleared ? 3 : sim.dg.state == DG_DEAD ? (deathAge < 12 ? 6 : 3)
+                       : sim.dg.state == DG_EXITED ? 4
+                       : !TrainingPlaced() ? (trainingDrops ? 13 : 0)
+                       : training[webLevel].door && !trainingDoorUsed ? 12
+                       : sim.barrelCount == 0 ? 10 : sim.barrels[0].alive ? 1 : 2;
+            WebStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, ready,
+                      webTool, ambushBlastDamage, webLevel, paused, ambushBlastCount);
+        } else {
+            int stage = sim.dg.state == DG_DEAD ? 7 : sim.dg.state == DG_EXITED ? 8
+                       : sim.dg.state == DG_NO_GOAL ? 9 : 5;
+            int next = -1;
+            if (stage == 7) {
+                bool secret = strcmp(curMap, "E1M3") == 0 && sim.dg.sector >= 0 &&
+                              map.sectors[sim.dg.sector].special == 9;
+                const char *mapName = NextCampaignMap(curMap, secret);
+                if (mapName) next = mapName[3] - '0' + 1;
+            }
+            WebStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, 0, webTool,
+                      -1, webLevel, paused, 0);
+            long barrelTics = sim.verbReadyTic[VERB_BARREL] - sim.tic;
+            long doorTics = sim.verbReadyTic[VERB_DOOR] - sim.tic;
+            WebEpisodeStatus(next, stage == 7 ? (int)sim.dg.finishTic : -1,
+                             barrelTics > 0 ? (int)((barrelTics + SIM_TICRATE - 1)/SIM_TICRATE) : 0,
+                             doorTics > 0 ? (int)((doorTics + SIM_TICRATE - 1)/SIM_TICRATE) : 0);
+        }
+#endif
+        bool compactHud = false;
+#ifdef PLATFORM_WEB
+        compactHud = GetScreenWidth() < 640;
+#endif
         if (doomcamOn || takeover) {
             Camera3D fp = DoomcamFrom(&sim, simAlpha);
             BeginTextureMode(doomcamRT);
@@ -2328,10 +2722,52 @@ static bool HelldropFrame(void)
         BeginMode3D(cam);
         DrawRoute(&sim, simAlpha);
         DrawPendingDrops(&sim, frame);
+        for (int i = 0; i < sim.boomHead && i < BOOMS_MAX; i++) {
+            const Boom *boom = &sim.booms[i];
+            if (boom->kind != BOOM_BARREL) continue;
+            float age = (float)(sim.tic - boom->tic) + simAlpha;
+            if (age < 0.0f || age >= 13.0f) continue;
+            Color ember = { 255, 163, 77, (unsigned char)(210.0f*(1.0f - age/13.0f)) };
+            DrawCircle3D((Vector3){ boom->pos.x, boom->z - 17.0f, -boom->pos.y },
+                         22.0f + 8.0f*age, (Vector3){ 1, 0, 0 }, 90, ember);
+        }
+#ifdef PLATFORM_WEB
+        if (webAmbush && sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED) {
+            Vector3 marine = DgRenderPos(&sim, simAlpha);
+            marine.y += 3;
+            DrawCircle3D(marine, 23, (Vector3){ 1, 0, 0 }, 90, SKYBLUE);
+        }
+        if (webAmbush && !TrainingPlaced()) {
+            Vector2 spot = training[webLevel].spots[trainingDrops];
+            Vector3 marker = { spot.x, 3, -spot.y };
+            DrawCircle3D(marker, 28, (Vector3){ 1, 0, 0 }, 90, LIME);
+            DrawCircle3D(marker, 31, (Vector3){ 1, 0, 0 }, 90, (Color){ 124, 242, 121, 120 });
+            DrawLine3D((Vector3){ marker.x - 6, marker.y, marker.z },
+                       (Vector3){ marker.x + 6, marker.y, marker.z }, LIME);
+            DrawLine3D((Vector3){ marker.x, marker.y, marker.z - 6 },
+                       (Vector3){ marker.x, marker.y, marker.z + 6 }, LIME);
+        }
+        if (webAmbush && TrainingPlaced()) {
+            if (training[webLevel].door && !trainingDoorUsed) {
+                DrawLine3D((Vector3){ 224, 96, -48 }, (Vector3){ 224, 96, -144 }, ORANGE);
+                DrawLine3D((Vector3){ 256, 96, -48 }, (Vector3){ 256, 96, -144 }, ORANGE);
+            }
+            for (int i = 0; i < sim.barrelCount; i++) {
+                const Barrel *barrel = &sim.barrels[i];
+                if (!barrel->alive) continue;
+                DrawCircle3D((Vector3){ barrel->pos.x, barrel->z + 3, -barrel->pos.y }, 27,
+                             (Vector3){ 1, 0, 0 }, 90, ambushReady ? RED : ORANGE);
+            }
+        }
+#endif
         bool cursorHot = false;
         int cursorCost = 0;
         bool cursorAfford = false;
-        if (groundOk) {
+        bool showDropCursor = groundOk;
+#ifdef PLATFORM_WEB
+        showDropCursor &= webHover && webTool == 0 && (!webAmbush || !TrainingPlaced());
+#endif
+        if (showDropCursor) {
             bool sOk = false;
             float gz = SimFloorAtPoint(&sim, ground.x, ground.y, &sOk);
             if (sOk) {
@@ -2359,57 +2795,92 @@ static bool HelldropFrame(void)
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(),
                           (Color){ 165, 10, 10, (unsigned char)(fade*120.0f) });
         } else if (doomcamOn && sim.dg.state != DG_EXITED) {
-            int px = 12, py = GetScreenHeight() - 212;
+            int width = compactHud ? GetScreenWidth()/3 : 320;
+            int height = width*5/8;
+            int px = compactHud ? 6 : 12, py = GetScreenHeight() - height - px;
             DrawTexturePro(doomcamRT.texture,
                            (Rectangle){ 0, 0, 320, -200 },
-                           (Rectangle){ (float)px, (float)py, 320, 200 },
+                           (Rectangle){ (float)px, (float)py, (float)width, (float)height },
                            (Vector2){ 0, 0 }, 0.0f, WHITE);
-            DrawRectangleLines(px - 1, py - 1, 322, 202, (Color){ 90, 90, 96, 255 });
+            DrawRectangleLines(px - 1, py - 1, width + 2, height + 2, (Color){ 90, 90, 96, 255 });
             DrawTextShadowed("DOOMCAM", px + 6, py + 4, 14, (Color){ 200, 60, 50, 255 });
         }
-        const char *intent = DgIntentLabel(&sim);
-        if (intent && strncmp(intent, intentPrev, sizeof(intentPrev) - 1) != 0) {
-            snprintf(intentPrev, sizeof(intentPrev), "%s", intent);
-            intentFlash = 30;
+#ifdef PLATFORM_WEB
+        if (webAmbush && sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED) {
+            Vector3 marine = DgRenderPos(&sim, simAlpha);
+            marine.y += 60.0f;
+            Vector2 label = GetWorldToScreen(marine, cam);
+            int size = 15;
+            DrawTextShadowed("MARINE", (int)label.x - MeasureText("MARINE", size)/2,
+                             (int)label.y, size, SKYBLUE);
         }
-        if (intentFlash > 0) intentFlash--;
-        DrawIntent(&sim, cam, simAlpha, intent, intentFlash);
-        const char *campLabel = NULL;
-        if (campaign) {
-            int num = CampaignNumber(curMap);
-            campLabel = (num > 0)
-                ? TextFormat("KNEE-DEEP IN HIS BLOOD - MAP %d/8", num)
-                : "KNEE-DEEP IN HIS BLOOD - SECRET LEVEL";
+        if (!webAmbush)
+#endif
+        {
+            const char *intent = DgIntentLabel(&sim);
+            if (intent && strncmp(intent, intentPrev, sizeof(intentPrev) - 1) != 0) {
+                snprintf(intentPrev, sizeof(intentPrev), "%s", intent);
+                intentFlash = 30;
+            }
+            if (intentFlash > 0) intentFlash--;
+            DrawIntent(&sim, cam, simAlpha, intent, intentFlash);
+            const char *campLabel = NULL;
+            if (campaign) {
+                int num = CampaignNumber(curMap);
+                campLabel = (num > 0)
+                    ? TextFormat("KNEE-DEEP IN HIS BLOOD - MAP %d/8", num)
+                    : "KNEE-DEEP IN HIS BLOOD - SECRET LEVEL";
+            }
+            const char *winHint = (campaign && !campaignComplete)
+                                      ? "SPACE: the invasion advances" : NULL;
+            if (!compactHud) {
+                DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo,
+                        campLabel, winHint);
+                DrawSoulsPanel(&sim, selectedKind, unlocked, &gsprites);
+                FaceStateUpdate(&faceState, &sim);
+                DrawStatusBar(&hud, &sim, &faceState, frame);
+            }
+            if (codexOpen) DrawCodex();
+            DrawHowTo(howtoFrames);
+            if (campaignComplete) DrawCampaignComplete();
         }
-        const char *winHint = (campaign && !campaignComplete)
-                                  ? "SPACE: the invasion advances" : NULL;
-        DrawHud(&map, PathBasename(opt.wadPath), &sim, opt.turbo,
-                campLabel, winHint);
-        DrawSoulsPanel(&sim, selectedKind, unlocked, &gsprites);
-        if (codexOpen) DrawCodex();
-        DrawHowTo(howtoFrames);
-        if (campaignComplete) DrawCampaignComplete();
-        FaceStateUpdate(&faceState, &sim);
-        DrawStatusBar(&hud, &sim, &faceState, frame);
         if (groundOk && cursorCost > 0) {
-            Vector2 mp = GetMousePosition();
+            Vector2 mp = pointer;
             Color tcol = !cursorAfford ? (Color){ 255, 80, 70, 255 }
                        : cursorHot     ? (Color){ 255, 180, 80, 255 }
                                        : (Color){ 160, 255, 170, 255 };
-            DrawTextShadowed(TextFormat("%d%s", cursorCost, cursorHot ? " HOT" : ""),
-                             (int)mp.x + 18, (int)mp.y - 6, 18, tcol);
+            const char *quote = TextFormat("%s  %d souls", cursorHot ? "Spotted" : "Hidden", cursorCost);
+            int x = (int)mp.x + 18;
+            int quoteWidth = MeasureText(quote, 18);
+            if (x + quoteWidth >= GetScreenWidth()) x = (int)mp.x - quoteWidth - 8;
+            DrawTextShadowed(quote, x, (int)mp.y - 6, 18, tcol);
         }
+#ifdef PLATFORM_WEB
+        WebNotice(dropMsgFrames > 0 ? dropMsg : "");
+#endif
         if (dropMsgFrames > 0) {
             dropMsgFrames--;
+#ifndef PLATFORM_WEB
             int w = MeasureText(dropMsg, 24);
             DrawTextShadowed(dropMsg, GetScreenWidth()/2 - w/2,
                              GetScreenHeight() - 110, 24,
                              (Color){ 255, 80, 70, 255 });
+#endif
+        }
+        if (paused) {
+            const char *label = "PAUSED";
+#ifndef PLATFORM_WEB
+            label = "PAUSED  |  P TO RESUME";
+#endif
+            DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){ 0, 0, 0, 120 });
+            DrawTextShadowed(label, (GetScreenWidth() - MeasureText(label, 26))/2,
+                             GetScreenHeight()/2 - 13, 26, RAYWHITE);
         }
         MeltDraw(&melt);
         frameWorkMs = (GetTime() - frameWorkStart)*1000.0;
         EndDrawing();
 
+#ifndef PLATFORM_WEB
         if (opt.dumpVideo) {
             static FILE *pipe;
             Image shot = LoadImageFromScreen();
@@ -2427,6 +2898,7 @@ static bool HelldropFrame(void)
             UnloadImage(shot);
             if (opt.exitAfter > 0 && frame + 1 >= opt.exitAfter && pipe) { pclose(pipe); pipe = NULL; }
         }
+#endif
         // Media capture: a numbered PNG per (Nth) frame for stitching into
         // GIF/MP4 with ffmpeg. Deterministic, so footage is reproducible.
         if (opt.dumpDir && (frame % opt.dumpEvery == 0)) {

@@ -31,5 +31,18 @@ for m in $MAPS; do
 done
 echo "unaided exits: $exits/$n"
 if [ $exits -lt 6 ]; then echo "  FAIL: unaided he should usually exit (>= 6/9)"; fail=1; fi
+seeded_result() {
+  "$BIN" --map E1M1 --wad assets/helldrop.wad --simonly 10000 --no-log \
+    --autodrop --seed "$1" 2>/dev/null | grep '^{"map"'
+}
+seeded=$(seeded_result 12345)
+replayed=$(seeded_result 12345)
+alternate=$(seeded_result 54321)
+if [ -z "$seeded" ] || [ "$seeded" != "$replayed" ] || [ -z "$alternate" ] || [ "$seeded" = "$alternate" ]; then
+  echo "FAIL: seeded combat must replay identically and vary between seeds"
+  fail=1
+else
+  echo "seeded combat replay: PASS"
+fi
 [ $fail = 0 ] && echo "PASS" || echo "FAILED"
 exit $fail

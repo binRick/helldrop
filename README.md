@@ -104,6 +104,20 @@ cd helldrop
 `run.sh` does an incremental `make` and launches the game attached to your
 terminal. No Homebrew dependencies — raylib is vendored and statically linked.
 
+**Browser build.** Run `make web-serve` with Emscripten on your PATH and
+open `http://localhost:8000`. Seven short lessons build from one summon to
+a two-demon ambush using a door, chain blast, and a race to the medkit.
+Completed lessons are marked in the level menu. The barrel lessons save your
+best winning blast. The menu also opens all nine Episode 1 maps. Episode runs remember your fastest
+clear per map in this browser. On touch screens, drag Episode 1 maps to pan
+and use **Track marine** to follow again. The 3D models load when you enter an
+Episode 1 map. Press **P** or use the browser's **Pause** button to stop the run.
+
+Run `make test` for the native campaign regression matrix and `make test-web`
+for the Chrome desktop and mobile-emulation smoke tests. The browser test
+requires Node.js 22+ and Chrome or Chromium. Set `HELLDROP_CHROME` to point
+to a different executable.
+
 **Want it to look exactly like Doom?** Drop your own `DOOM.WAD` / `DOOM2.WAD`
 into `assets/` (or pass `--wad <path>`). Every visual and sound is decoded from
 the WAD, so an id IWAD makes the game pixel-identical to Doom. id's assets are
@@ -119,6 +133,7 @@ copyrighted and are **never** committed to this repo — you bring your own.
 |---|---|
 | `--wad <path>` | Use a specific IWAD (else auto-detect → `helldrop.wad` → Freedoom) |
 | `--map E1M2` | Single-level mode, full bestiary unlocked (use this for testing) |
+| `--seed <N>` | Replay a deterministic variation of the combat rolls. Zero uses the default seed. |
 | `--turbo <N>` | Run the sim `N`× faster — great for watching the AI quickly |
 | `--autodrop` | Scripted demon waves on his route (the combat/balance smoke test) |
 | `--selftest` | Render 60 frames, write `selftest.png`, exit (headless verification) |
@@ -164,6 +179,8 @@ loots the arsenal.
 | **V** | **Hell's Hand:** detonate the nearest barrel (chain-reacts) |
 | **TAB** | Toggle the Know-Your-Enemy codex |
 | **C** | Toggle the doomcam (his first-person view) |
+| **P** | Pause / resume |
+| **U** | Mute / unmute |
 | **G** | Restart the sim (deterministic — same playout) |
 | **SPACE** | Advance to the next level (after a campaign win) · **ESC** quit |
 
@@ -495,8 +512,7 @@ helldrop/
   `NO_GOAL` — more floor specials (stair builders, donuts) needed for full
   unaided routing. (Retail Entryway *does* complete; Freedoom2's MAP01 differs.)
 - Key doors currently open unlocked (logged); no in-game music yet.
-- Future: a `--seed` flag + headless balance harness, an inverted difficulty
-  scale, a title/pause screen, and more original art layered into the pack.
+- Future: an inverted difficulty scale and more original art layered into the pack.
 
 ---
 

@@ -305,7 +305,7 @@ const SpriteFrame *BoomSpriteFrame(const GameSprites *gs, BoomKind kind, long ag
 {
     const SpriteSet *set;
     const char *seq;
-    if (kind == BOOM_ROCKET) { set = &gs->missile; seq = "BCD"; }
+    if (kind == BOOM_ROCKET || kind == BOOM_BARREL) { set = &gs->missile; seq = "BCD"; }
     else if (kind == BOOM_CACOBALL) { set = &gs->ball[1]; seq = "CDE"; }
     else if (kind == BOOM_TRACER) { set = &gs->tracerBoom; seq = "ABC"; }
     else if (kind == BOOM_BARONBALL) { set = &gs->baronBall; seq = "CDE"; }
