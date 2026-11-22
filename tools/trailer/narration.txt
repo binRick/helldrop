@@ -1,0 +1,16 @@
+# clip | line (ElevenLabs, voice Brian nPczCjzI2devNBz1zQrb, eleven_multilingual_v2,
+#        stability 0.42, similarity 0.8, style 0.35, speed 0.95)
+L01-intro  | In every Doom you've ever played... you were him.
+L02-wide   | An AI marine, tearing through real Doom levels. Doors. Lifts. Switches. He always finds the exit.
+L03-hell   | This time, you're not the hero. You are Hell.
+L04-drop   | Pick a demon. Drop it where he can't see. Hidden in the dark, it costs you less.
+L05-tithe  | And every drop of his blood pays you back. One soul, for every point of damage.
+L06-roster | Fourteen demons. From rotting zombies to the arch-vile who raises your dead.
+L07-tells  | He has tells. He always runs for the medkit. He always loots your corpses. Use it.
+L08-hand   | Slam a door in his face. Blow a barrel at his back.
+L09-kill   | Kill him... before he flips the switch.
+L10-title  | Helldrop. Coming soon to the App Store.
+S01        | Every Doom, you were the hero.
+S02        | Now... you're Hell.
+S03        | Drop demons. Spend his blood. Kill him before he reaches the exit.
+S04        | Helldrop. Coming soon to the App Store.

@@ -1,0 +1,11 @@
+# segment | take (or card:<name>) | in (s) | dur (s) | vo clip or - | vo start in segment (s) | caption
+intro  | card:intro | 0    | 4.0 | L01-intro  | 0.5 |
+wide   | wide       | 0.5  | 7.8 | L02-wide   | 0.2 |
+hell   | close      | 3.8  | 3.4 | L03-hell   | 0.2 |
+drop   | close      | 7.0  | 6.2 | L04-drop   | 0.2 |
+tithe  | m2         | 8.0  | 5.9 | L05-tithe  | 0.2 |
+roster | roster     | 1.0  | 5.8 | L06-roster | 0.2 |
+tells  | m4         | 6.0  | 5.6 | L07-tells  | 0.2 |
+hand   | m7         | 6.0  | 4.0 | L08-hand   | 0.2 |
+kill   | close      | 12.8 | 6.5 | L09-kill   | 0.4 |
+end    | card:end   | 0    | 5.5 | L10-title  | 1.0 |

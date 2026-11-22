@@ -48,8 +48,10 @@ typedef struct Options {
     long turbo;            // sim speed multiplier (1 = real time)
     const char *dumpDir;   // --dump-frames <dir>: PNG per frame (media capture)
     long dumpEvery;        // --dump-every <N>: dump cadence in frames
+    const char *dumpVideo; // --dump-video <out.mp4>: stream frames into ffmpeg (35 fps, 1080p)
     long simOnly;          // --simonly <tics>: headless match, prints outcome JSON
     bool viewer;           // --viewer: model gallery (dev mode), screenshot with --selftest
+    int winW, winH;        // --size WxH (trailer capture at 1920x1080)
     int garrisonSkill;     // --garrison-skill <1|2|4>: map-thing skill bit (balance)
     int garrisonDmg;       // --garrison-dmg <pct>: native monster damage (balance)
 } Options;
@@ -222,8 +224,11 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
     opt->turbo = 1;
     opt->dumpDir = NULL;
     opt->dumpEvery = 1;
+    opt->dumpVideo = NULL;
     opt->simOnly = 0;
     opt->viewer = false;
+    opt->winW = 1600;
+    opt->winH = 900;
     opt->garrisonSkill = -1;
     opt->garrisonDmg = -1;
 
@@ -261,10 +266,15 @@ static bool ParseArgs(int argc, char **argv, Options *opt)
         } else if (strcmp(argv[i], "--garrison-dmg") == 0 && i + 1 < argc) {
             opt->garrisonDmg = atoi(argv[++i]);
             if (opt->garrisonDmg < 1 || opt->garrisonDmg > 400) return false;
+        } else if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            if (sscanf(argv[++i], "%dx%d", &opt->winW, &opt->winH) != 2 ||
+                opt->winW < 320 || opt->winH < 240) return false;
         } else if (strcmp(argv[i], "--viewer") == 0) {
             opt->viewer = true;
         } else if (strcmp(argv[i], "--bg") == 0 || strcmp(argv[i], "--show") == 0) {
             // handled by kit_window_flags (hidden, unfocused, silent test runs)
+        } else if (strcmp(argv[i], "--dump-video") == 0 && i + 1 < argc) {
+            opt->dumpVideo = argv[++i];
         } else if (strcmp(argv[i], "--dump-every") == 0 && i + 1 < argc) {
             char *end = NULL;
             opt->dumpEvery = strtol(argv[++i], &end, 10);
@@ -1462,6 +1472,7 @@ static void DrawHud(const DoomMap *map, const char *wadBase, const Sim *sim,
                          16, (Color){ 255, 120, 90, 255 });
     }
     y += 30;
+    if (!debugHud && getenv("HELLDROP_CLEAN_HUD")) goto end_hud;   // trailer footage
     if (!debugHud) {
         DrawTextShadowed("LMB drop demon   1-9,0 pick   F slam door/lift   V barrel   "
                          "TAB his tells   SPACE follow   R map   F1 debug",
@@ -1847,10 +1858,21 @@ int main(int argc, char **argv)
     LogStartup();
 
     // Runs that quit by themselves are tests: no window, focus, Dock tile or sound.
+    if (opt.dumpVideo && !opt.dumpDir) {
+        // Video capture shares --dump-frames' fixed-tic timing; sound.txt and
+        // snd/ land next to the video.
+        static char dir[1024];
+        snprintf(dir, sizeof(dir), "%s", opt.dumpVideo);
+        char *slash = strrchr(dir, '/');
+        if (slash) *slash = '\0'; else snprintf(dir, sizeof(dir), ".");
+        opt.dumpDir = dir;
+        opt.dumpEvery = 1000000000;   // no PNGs
+    }
     if (opt.selftest || opt.exitAfter > 0 || opt.dumpDir || opt.simOnly) kit_background(1);
-    SetConfigFlags(kit_window_flags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT,
+    SetConfigFlags(kit_window_flags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT |
+                                    (opt.dumpVideo ? FLAG_WINDOW_HIGHDPI : 0),
                                     argc, argv));
-    InitWindow(1600, 900, "HELLDROP");
+    InitWindow(opt.winW, opt.winH, "HELLDROP");
     kit_background_apply();   // hidden runs leave the Dock before any loading
 #ifdef PLATFORM_WEB
     // requestAnimationFrame drives cadence on web; calling SetTargetFPS would
@@ -1861,7 +1883,7 @@ int main(int argc, char **argv)
 #else
     SetTargetFPS(60);
     // Left edge of the monitor so the terminal stays visible alongside.
-    SetWindowPosition(8, (GetMonitorHeight(GetCurrentMonitor()) - 900)/2);
+    SetWindowPosition(8, (GetMonitorHeight(GetCurrentMonitor()) - opt.winH)/2);
 #endif
 
     // wad/map/lm live at file scope (above); the loader fills them below.
@@ -1989,15 +2011,16 @@ int main(int argc, char **argv)
         for (long f = 0; !WindowShouldClose(); f++) {
             float t = (float)f/60.0f;
             Camera3D c = { 0 };
-            c.target = (Vector3){ 300, 0, -200 };
-            c.position = Vector3Add(c.target, (Vector3){ 2000*cosf(50*DEG2RAD)*sinf(45*DEG2RAD), 2000*sinf(50*DEG2RAD), 2000*cosf(50*DEG2RAD)*cosf(45*DEG2RAD) });
-            c.up = (Vector3){ 0, 1, 0 }; c.fovy = 700; c.projection = CAMERA_ORTHOGRAPHIC;
+            c.target = opt.dumpVideo ? (Vector3){ 340, 30, -150 } : (Vector3){ 300, 30, -200 };
+            float yawV = (25.0f + t*9.0f)*DEG2RAD;   // slow orbit (reads well in video)
+            c.position = Vector3Add(c.target, (Vector3){ 2000*cosf(40*DEG2RAD)*sinf(yawV), 2000*sinf(40*DEG2RAD), 2000*cosf(40*DEG2RAD)*cosf(yawV) });
+            c.up = (Vector3){ 0, 1, 0 }; c.fovy = opt.dumpVideo ? 500 : 700; c.projection = CAMERA_ORTHOGRAPHIC;
             int clip = (int)(t/2.0f) % CLIP_COUNT;
             BeginDrawing();
-            ClearBackground((Color){ 20, 20, 24, 255 });
+            ClearBackground((Color){ 10, 6, 6, 255 });
             BeginMode3D(c);
-            DrawPlane((Vector3){ 300, 0, -200 }, (Vector2){ 1400, 1000 }, (Color){ 70, 68, 64, 255 });
-            DrawGrid(28, 50.0f);
+            DrawPlane((Vector3){ 300, 0, -200 }, (Vector2){ 4000, 4000 }, opt.dumpVideo ? (Color){ 38, 22, 20, 255 } : (Color){ 70, 68, 64, 255 });
+            if (!opt.dumpVideo) DrawGrid(28, 50.0f);
             int n = 0;
             for (int k = 0; k < MK_COUNT; k++) {
                 if (k == MK_SPECTRE || !gmodels.mob[k].loaded) continue;
@@ -2010,8 +2033,22 @@ int main(int argc, char **argv)
                 GameModelDraw(&gmodels, &gmodels.marine, (Vector3){ 700, 0, 0 }, 300.0f, (ModelClip)clip,
                               fmodf(t, 2.0f), clip < 2, WHITE, 0.9f);
             EndMode3D();
-            DrawText(TextFormat("--viewer  clip: %s", CLIPN[clip]), 12, 12, 24, RAYWHITE);
+            if (!opt.dumpVideo) DrawText(TextFormat("--viewer  clip: %s", CLIPN[clip]), 12, 12, 24, RAYWHITE);
             EndDrawing();
+            if (opt.dumpVideo) {
+                static FILE *vp;
+                Image shot = LoadImageFromScreen();
+                if (!vp) {
+                    char cmd[2048];
+                    snprintf(cmd, sizeof(cmd), "ffmpeg -v error -y -f rawvideo -pix_fmt rgba -s %dx%d -r 60 -i - "
+                             "-vf scale=1920:1080:flags=lanczos,format=yuv420p -c:v libx264 -preset veryfast -crf 14 '%s'",
+                             shot.width, shot.height, opt.dumpVideo);
+                    vp = popen(cmd, "w");
+                }
+                if (vp) fwrite(shot.data, 4, (size_t)shot.width*shot.height, vp);
+                UnloadImage(shot);
+                if (opt.exitAfter > 0 && f + 1 >= opt.exitAfter) { if (vp) pclose(vp); break; }
+            }
             if (opt.selftest && f >= ((opt.exitAfter > 0) ? opt.exitAfter : 60)) {
                 TakeScreenshot("selftest.png");
                 break;
@@ -2023,6 +2060,7 @@ int main(int argc, char **argv)
     }
     InitAudioDevice();
     GameAudioLoad(&gaudio, &wad);
+    if (opt.dumpDir) GameAudioCaptureOpen(&gaudio, &wad, opt.dumpDir);
     kit_background_apply();
     if (kit_in_background()) SetTargetFPS(0);   // test runs: measure real throughput
 
@@ -2032,7 +2070,7 @@ int main(int argc, char **argv)
     dropMsg[0] = '\0';
     dropMsgFrames = 0;
     codexOpen = false;
-    howtoFrames = opt.selftest ? 0 : 60*20;
+    howtoFrames = (opt.selftest || opt.dumpDir) ? 0 : 60*20;
     debugHud = false;
     intentPrev[0] = '\0';
     intentFlash = 0;
@@ -2266,6 +2304,7 @@ static bool HelldropFrame(void)
         }
         float simAlpha = (float)(simAcc / SIM_TICTIME);
 
+        gaudio.captureTime = (double)frame/35.0*(double)opt.turbo/(double)opt.turbo;   // dump: 1 frame = turbo tics, played back at 35 fps
         GameAudioDrain(&gaudio, &sim, (Vector2){ vs.target.x, -vs.target.z });
         if (levelShader.id) UpdateDynamicLights(&sim, simAlpha);
 
@@ -2371,6 +2410,23 @@ static bool HelldropFrame(void)
         frameWorkMs = (GetTime() - frameWorkStart)*1000.0;
         EndDrawing();
 
+        if (opt.dumpVideo) {
+            static FILE *pipe;
+            Image shot = LoadImageFromScreen();
+            if (!pipe) {
+                char cmd[2048];
+                snprintf(cmd, sizeof(cmd),
+                         "ffmpeg -v error -y -f rawvideo -pix_fmt rgba -s %dx%d -r 35 -i - "
+                         "-vf scale=1920:1080:flags=lanczos,format=yuv420p "
+                         "-c:v libx264 -preset veryfast -crf 14 '%s'",
+                         shot.width, shot.height, opt.dumpVideo);
+                pipe = popen(cmd, "w");
+                TraceLog(LOG_INFO, "MAIN: streaming %dx%d frames to %s", shot.width, shot.height, opt.dumpVideo);
+            }
+            if (pipe) fwrite(shot.data, 4, (size_t)shot.width*shot.height, pipe);
+            UnloadImage(shot);
+            if (opt.exitAfter > 0 && frame + 1 >= opt.exitAfter && pipe) { pclose(pipe); pipe = NULL; }
+        }
         // Media capture: a numbered PNG per (Nth) frame for stitching into
         // GIF/MP4 with ffmpeg. Deterministic, so footage is reproducible.
         if (opt.dumpDir && (frame % opt.dumpEvery == 0)) {

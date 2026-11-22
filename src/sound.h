@@ -15,11 +15,15 @@ typedef struct GameAudio {
     bool has[SND_COUNT];
     long cursor;            // last sim sndHead consumed
     bool ready;
+    void *capture;          // FILE* while capturing a trailer take, else NULL
+    double captureTime;     // seconds of footage at the current drain
 } GameAudio;
 
 bool GameAudioLoad(GameAudio *ga, const Wad *wad);   // needs InitAudioDevice
 void GameAudioUnload(GameAudio *ga);
 // Play new sim sound events; listener is the camera target (doom coords).
 void GameAudioDrain(GameAudio *ga, const Sim *sim, Vector2 listener);
+// --dump-frames: write snd/<lump>.wav and sound.txt ("seconds lump gain").
+bool GameAudioCaptureOpen(GameAudio *ga, const Wad *wad, const char *dir);
 
 #endif

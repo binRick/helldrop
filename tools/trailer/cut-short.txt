@@ -1,0 +1,7 @@
+# segment | take (or card:<name>) | in (s) | dur (s) | vo clip or - | vo start in segment (s) | caption
+s1  | close      | 3.5  | 2.6 | S01 | 0.3 | Every Doom, you were the hero.
+s2  | m2         | 8.0  | 2.6 | S02 | 0.3 | Now... you're Hell.
+s3  | roster     | 1.5  | 2.4 | -   | 0   | 14 demons. Drop them anywhere.
+s4  | m7         | 6.5  | 2.6 | S03 | 0.2 | Spend his blood.
+s5  | close      | 13.2 | 4.0 | -   | 0   | Kill him before the exit.
+end | card:endv  | 0    | 4.5 | S04 | 0.6 |

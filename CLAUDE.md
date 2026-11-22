@@ -75,6 +75,14 @@ Full design rationale and roadmap: `DESIGN.md`.
 - `--selftest` — loads the map, renders 60 frames, writes `selftest.png`,
   exits 0. Combine with `--turbo 8` to screenshot mid-simulation. Use this
   (then Read the png) to verify changes without user interaction.
+- **Trailer pipeline** (`tools/trailer/`): `--dump-video out.mp4` streams 35 fps
+  capture straight into ffmpeg (use `--size 1440x810`; HiDPI makes it 2880x1620,
+  scaled to 1080p) and writes `sound.txt` + `snd/*.wav` beside it so the game's
+  real sound effects are rebuilt in sync. `HELLDROP_CLEAN_HUD=1` hides the key
+  hints, `HELLDROP_FOVY` sets the zoom. Cut lists `cut-long.txt` /
+  `cut-short.txt`, narration in `narration.txt` (ElevenLabs), `cards.py`
+  (title/end/Short frame), `mix.py` (numpy soundtrack, -14 LUFS, faded edges),
+  `edit.py` (ffmpeg assembly — run on the mini host). Outputs in build/trailer/.
 - `--dump-frames <dir> [--dump-every N]` — writes `frame_%05d.png` per (Nth)
   rendered frame for stitching gameplay GIF/MP4 with ffmpeg. In this mode the
   sim advances a FIXED `turbo` tics per frame (ignoring wall clock), so

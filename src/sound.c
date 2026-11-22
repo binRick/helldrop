@@ -1,6 +1,7 @@
 #include "sound.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #define AUDIBLE_RANGE 2200.0f
@@ -102,7 +103,36 @@ void GameAudioDrain(GameAudio *ga, const Sim *sim, Vector2 listener)
         float vol = 1.0f - dist/AUDIBLE_RANGE;
         SetSoundVolume(ga->snd[ev->id], 0.15f + 0.85f*vol);
         PlaySound(ga->snd[ev->id]);
+        if (ga->capture) fprintf((FILE *)ga->capture, "%.4f %s %.3f\n", ga->captureTime,
+                                 SND_LUMPS[ev->id], 0.15f + 0.85f*vol);
         played++;
     }
     ga->cursor = sim->sndHead;
+}
+
+// Trailer capture: export every effect as WAV and log each play (time,
+// lump, gain) so footage dumped with --dump-frames gets its real sound.
+bool GameAudioCaptureOpen(GameAudio *ga, const Wad *wad, const char *dir)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/snd", dir);
+    MakeDirectory(path);
+    for (int i = 0; i < SND_COUNT; i++) {
+        int idx = WadFindLump(wad, SND_LUMPS[i], 0);
+        if (idx < 0) continue;
+        int size = 0;
+        const unsigned char *d = WadLumpData(wad, idx, &size);
+        if (!d || size < 40) continue;
+        int rate = d[2] | (d[3] << 8);
+        unsigned len = (unsigned)d[4] | ((unsigned)d[5] << 8) | ((unsigned)d[6] << 16) | ((unsigned)d[7] << 24);
+        if (len > (unsigned)size - 8) len = (unsigned)size - 8;
+        if (len <= 32) continue;
+        Wave w = { .frameCount = len - 32, .sampleRate = (unsigned)rate, .sampleSize = 8,
+                   .channels = 1, .data = (void *)(d + 8 + 16) };
+        snprintf(path, sizeof(path), "%s/snd/%s.wav", dir, SND_LUMPS[i]);
+        ExportWave(w, path);
+    }
+    snprintf(path, sizeof(path), "%s/sound.txt", dir);
+    ga->capture = fopen(path, "w");
+    return ga->capture != NULL;
 }
