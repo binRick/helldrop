@@ -37,6 +37,12 @@
   #brief, #controls { padding:.5rem; text-align:center; background:#151015; }
   #brief { min-height:3.9rem; display:grid; place-content:center; gap:.25rem; }
   #instruction { min-height:2.4em; display:grid; place-items:center; }
+  #game.lesson-cleared #instruction { color:#bdf6bd; font-weight:bold; }
+  #lesson-action #continue {
+    background:#f9a05e; color:#20100a; border-color:#ffd09c;
+    font-weight:bold; padding-inline:1.25rem;
+  }
+  #lesson-action #continue:focus-visible { outline:2px solid white; outline-offset:2px; }
   #navigation { display:flex; justify-content:center; gap:.4rem; min-width:0; }
   #navigation select { min-width:0; max-width:55%; }
   #brief { grid-template-columns:minmax(0, 1fr); }
@@ -105,7 +111,9 @@
         <button id="pause" type="button">Pause</button>
         <button id="mute" type="button" aria-pressed="false">Mute</button>
       </div>
-      <div id="instruction" aria-live="polite"></div><div id="stats"></div>
+      <div id="instruction" aria-live="polite"></div>
+      <div id="lesson-action" hidden></div>
+      <div id="stats"></div>
       <div id="notice" role="status"></div>
     </div>
     <div id="stage"><canvas class="emscripten" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas></div>
@@ -182,6 +190,8 @@
     var barrel = document.getElementById('blast');
     var retry = document.getElementById('retry');
     var continueButton = document.getElementById('continue');
+    var controls = document.getElementById('controls');
+    var lessonAction = document.getElementById('lesson-action');
     var step = 0;
     var tool = 0;
     var lastStatus;
@@ -272,14 +282,20 @@
       setText(pauseButton, paused ? 'Resume' : 'Pause');
       var full = !trainingOrder.includes(level);
       game.classList.toggle('episode', full);
+      var cleared = step === 3 && !full;
+      game.classList.toggle('lesson-cleared', cleared);
+      lessonAction.hidden = !cleared;
+      var continueParent = cleared ? lessonAction : controls;
+      if (continueButton.parentElement !== continueParent) continueParent.appendChild(continueButton);
       var ended = step === 3 || step === 4 || (step >= 7 && step <= 9);
       var message = [
         openingTips[level],
         near ? 'He’s in range. Blow the barrel!' : 'Wait until he’s close to the barrel.',
         'The barrel is gone. See if your demon can finish him.',
-        level === 11 ? 'Shotgunner summoned.' : level === 12 ? 'Hidden summon deployed instantly.'
-                    : level === 14 ? 'Crossfire landed a hit.'
-                    : level === 15 ? 'Training complete. Try Episode 1.' : 'Lesson cleared.',
+        level === 11 ? 'Good job! You summoned a shotgunner.'
+                    : level === 12 ? 'Good job! Your hidden summon deployed instantly.'
+                    : level === 14 ? 'Good job! Your crossfire landed a hit.'
+                    : level === 15 ? 'Good job! Training complete.' : 'Good job! Lesson cleared.',
         'He reached the exit. Retry the lesson.',
         tool === 1 ? 'Tap a door or lift.' : tool === 2 ? 'Tap near a barrel.' : 'Choose a demon and tap the map.',
         'Marine down.',

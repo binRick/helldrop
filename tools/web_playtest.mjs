@@ -170,7 +170,9 @@ try {
   await button('#start');
   await wait("currentLevel === 11 && step === 0 && instruction.textContent.includes('green ring')");
   await tap(await trainingSpot(720, 460, 128));
-  await wait('step === 3');
+  await wait("step === 3 && instruction.textContent.startsWith('Good job!')");
+  assert.equal(await evaluate("continueButton.parentElement.id"), 'lesson-action');
+  assert.equal(await evaluate("continueButton.textContent"), 'Next lesson');
   await button('#continue');
   await wait('currentLevel === 12 && step === 0');
   await tap(await trainingSpot(480, 304, 96));
