@@ -149,9 +149,10 @@ bool GameModelsLoad(GameModels *gm, const char *dir)
     gm->shader = LoadShaderFromMemory(MODEL_VS, MODEL_FS);
     if (gm->shader.id == 0) return false;
     gm->cpuSkin = getenv("HELLDROP_CPU_SKIN") != NULL;
-#ifdef PLATFORM_WEB
-    // WebGL 2: GPU skinning produced stretched "spike" vertices in Chrome;
-    // CPU skinning renders correctly and culling keeps it cheap.
+#if defined(PLATFORM_WEB) || defined(PLATFORM_IOS)
+    // OpenGL ES 3 (WebGL 2 in Chrome, and Apple's GLES on iPhone): GPU
+    // skinning produced stretched "spike" vertices; CPU skinning renders
+    // correctly and culling keeps it cheap.
     gm->cpuSkin = true;
 #endif
     if (gm->cpuSkin) {
