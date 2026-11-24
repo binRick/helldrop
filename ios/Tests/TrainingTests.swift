@@ -26,6 +26,27 @@ final class TrainingTests: XCTestCase {
         XCTAssertTrue(next.waitForExistence(timeout: 12))
     }
 
+    func testCampaignAmbushStartsTheClockAndChargesTheQuotedPrice() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-lastLevel", "2"]
+        app.launch()
+        let action = app.buttons["campaign.ambush"]
+        XCTAssertTrue(action.waitForExistence(timeout: 20))
+        XCTAssertTrue(app.staticTexts["30 souls  ·  Marine 100%"].exists)
+        XCTAssertEqual(action.label, "Ambush · 21 souls")
+        app.buttons["Pause"].tap()
+        XCTAssertFalse(action.isEnabled)
+        app.buttons["Resume"].tap()
+        XCTAssertTrue(action.isEnabled)
+        let field = app.descendants(matching: .any)["Battlefield"]
+        let fieldHeight = field.frame.height
+        action.tap()
+        XCTAssertTrue(app.staticTexts["Demon summoned · 21 souls spent"].waitForExistence(timeout: 5))
+        XCTAssertFalse(action.isEnabled)
+        XCTAssertEqual(field.frame.height, fieldHeight, accuracy: 1)
+    }
+
     // Project the authored ring through the training camera into the current drawable.
     private func placeSummon(on field: XCUIElement, eastWall: Double, x: Double, y: Double) {
         let aspect = field.frame.width / field.frame.height

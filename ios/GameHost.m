@@ -32,9 +32,9 @@ static NSString *briefing(Battle b) {
         case 2: return @"Watch your ambush play out.";
         case 3: return b.level == 15 ? @"Good job! Training complete." : @"Good job! Lesson cleared.";
         case 4: case 8: return @"The marine escaped. Try another ambush.";
-        case 5: return b.tool == 1 ? @"Tap a door or lift." : b.tool == 2 ? @"Tap near a barrel." : @"Tap the map to summon. Drag to pan, pinch to zoom.";
+        case 14: case 5: return b.tool == 1 ? @"Tap a door or lift." : b.tool == 2 ? @"Tap near a barrel." : (b.step == 14 ? @"Stop the marine before he escapes. Tap Ambush to start." : @"Use Ambush for the green ring, or tap a floor to summon.");
         case 6: return @"Marine down.";
-        case 7: return b.level == 9 ? @"Episode cleared!" : @"Marine down. Continue the invasion.";
+        case 7: return b.level == 9 ? @"Episode cleared!" : @"Marine down. Map cleared!";
         case 9: return @"The marine lost his route. Retry this map.";
         case 10: return @"Watch your demon intercept the marine.";
         case 12: return @"Slam the door to hold the marine.";
@@ -73,12 +73,13 @@ static UIAction *item(NSString *name, void (^handler)(void)) {
 @property UIScrollView *panel;
 @property UIStackView *content;
 @property UILabel *tip, *stats;
+@property NSLayoutConstraint *briefingHeight;
 @property UIButton *levels, *pause, *options, *primary, *demon;
 @property NSMutableDictionary<NSNumber *,NSString *> *demons;
 @property NSArray *layout;
 @property Battle battle;
 @property BOOL initialized, failed, horizontal, muted;
-@property int pixelW, pixelH, nextLevel, barrelWait, doorWait, clearTicks;
+@property int ambushPrice, pixelW, pixelH, nextLevel, barrelWait, doorWait, clearTicks;
 @property NSString *notice;
 - (void)refresh;
 - (void)episodeNext:(int)next ticks:(int)ticks barrel:(int)barrel door:(int)door;
@@ -129,6 +130,8 @@ static GameController *active;
     UIStackView *nav = [[UIStackView alloc] initWithArrangedSubviews:@[self.levels,self.pause,self.options]];
     nav.spacing = 8;
     self.tip = label(18, UIFontWeightSemibold, UIFontTextStyleBody);
+    self.briefingHeight = [self.tip.heightAnchor constraintGreaterThanOrEqualToConstant:0];
+    self.briefingHeight.active = YES;
     self.tip.text = @"Preparing the battlefield…";
     self.stats = label(14, UIFontWeightRegular, UIFontTextStyleSubheadline);
     self.stats.textColor = [UIColor colorWithWhite:.78 alpha:1];
@@ -219,7 +222,8 @@ static GameController *active;
 - (void)primaryAction {
     Battle b = self.battle;
     if (b.paused) return;
-    if (b.step == 1) WebAction(WEB_BLAST,0);
+    if (b.step == 5 || b.step == 14) WebAction(IOS_AMBUSH,self.ambushPrice);
+    else if (b.step == 1) WebAction(WEB_BLAST,0);
     else if (b.step == 12) WebAction(WEB_TOOL,1);
     else if (b.step == 3) {
         NSUInteger i = [lessons() indexOfObject:@(b.level)] + 1;
@@ -236,7 +240,12 @@ static GameController *active;
         if ([completed containsObject:n]) name = [name stringByAppendingString:@" ✓"];
         [training addObject:item(name,^{ WebAction(WEB_CONTINUE,n.intValue); })];
     }
-    for (int i=2; i<=10; i++) [episode addObject:item(levelName(i),^{WebAction(WEB_CONTINUE,i);})];
+    for (int i=2; i<=10; i++) {
+        NSString *name = levelName(i);
+        if ([defaults objectForKey:[NSString stringWithFormat:@"bestClear.%d",i]])
+            name = [name stringByAppendingString:@" ✓"];
+        [episode addObject:item(name,^{WebAction(WEB_CONTINUE,i);})];
+    }
     self.levels.menu = [UIMenu menuWithChildren:@[[UIMenu menuWithTitle:@"Training" children:training],[UIMenu menuWithTitle:@"Episode 1" children:episode]]];
     __weak GameController *weakSelf = self;
     NSMutableArray *options = [NSMutableArray arrayWithObjects:item(@"Retry",^{WebAction(WEB_RETRY,0);}),
@@ -251,15 +260,19 @@ static GameController *active;
         [options addObject:item(@"Toggle Doomcam",^{WebAction(WEB_DOOMCAM,0);})];
     }
     self.options.menu = [UIMenu menuWithChildren:options];
-    NSMutableArray *picks = [NSMutableArray array];
+    NSMutableArray *picks = [NSMutableArray array], *more = [NSMutableArray array];
     for (NSNumber *kind in [self.demons.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
         NSString *title = self.demons[kind];
         if (!full && ![title hasPrefix:@"Imp "] && ![title hasPrefix:@"Shotgunner "]) continue;
-        [picks addObject:item(title,^{WebAction(WEB_PICK,kind.intValue);})];
+        UIAction *pick = item(title,^{WebAction(WEB_PICK,kind.intValue);});
+        if (full && kind.intValue > 3) [more addObject:pick];
+        else [picks addObject:pick];
     }
     if (full) {
-        [picks addObject:item(@"Door / lift · 15 / 20",^{WebAction(WEB_TOOL,1);})];
-        [picks addObject:item(@"Barrel · 30",^{WebAction(WEB_TOOL,2);})];
+        if (more.count) [picks addObject:[UIMenu menuWithTitle:@"More demons" children:more]];
+        [picks addObject:[UIMenu menuWithTitle:@"Traps" children:@[
+            item(@"Door / lift · 15 / 20",^{WebAction(WEB_TOOL,1);}),
+            item(@"Barrel · 30",^{WebAction(WEB_TOOL,2);})]]];
     }
     self.demon.menu = [UIMenu menuWithChildren:picks];
 }
@@ -268,6 +281,9 @@ static GameController *active;
     [self.levels setTitle:levelName(b.level) forState:UIControlStateNormal];
     [self.pause setTitle:b.paused ? @"Resume" : @"Pause" forState:UIControlStateNormal];
     self.pause.enabled = !(b.step == 3 || b.step == 4 || (b.step >= 6 && b.step <= 9));
+    // Keep the battlefield and drop target still as short status messages change.
+    BOOL deploying = b.step == 5 || b.step == 14;
+    self.briefingHeight.constant = deploying ? ceil(self.tip.font.lineHeight * 3) : 0;
     self.tip.text = briefing(b);
     self.tip.textColor = b.step == 3 || b.step == 7 ? UIColor.systemGreenColor : UIColor.whiteColor;
     NSString *stats = [NSString stringWithFormat:@"%d souls  ·  Marine %d%%",b.souls,MAX(0,b.health)];
@@ -280,19 +296,27 @@ static GameController *active;
         NSInteger best = [NSUserDefaults.standardUserDefaults integerForKey:[NSString stringWithFormat:@"bestClear.%d",b.level]];
         stats = [NSString stringWithFormat:@"Clear %.1f s  ·  Best %.1f s",self.clearTicks/35.0,best/35.0];
     }
-    self.stats.text = self.notice.length && b.step != 3 ? self.notice : stats;
+    BOOL summoning = deploying && b.tool == 0;
+    if (summoning && self.notice.length && !b.paused) self.tip.text = self.notice;
+    self.stats.text = !summoning && self.notice.length && b.step != 3 && b.step != 7 ? self.notice : stats;
     NSString *action = nil;
+    if (summoning) action = [NSString stringWithFormat:@"Ambush · %d souls",self.ambushPrice];
     if (b.step == 3) action = b.level == 15 ? @"Play Episode 1" : @"Next lesson";
     if (b.step == 1) action = @"Blow barrel";
     if (b.step == 12) action = @"Slam door";
-    if (b.step == 7 && self.nextLevel >= 0) action = @"Next map";
+    if (b.step == 7 && self.nextLevel >= 0) action = [NSString stringWithFormat:@"Play %@",levelName(self.nextLevel)];
     if (b.step == 4 || b.step == 8 || b.step == 9) action = @"Retry";
-    self.primary.hidden = !action; self.primary.enabled = !b.paused;
+    self.primary.hidden = !action; self.primary.enabled = !b.paused && (!summoning || b.souls >= self.ambushPrice);
+    if (summoning && !self.primary.enabled && !b.paused && !self.notice.length)
+        self.tip.text = b.step == 14 ? @"Choose a cheaper demon for your first ambush." : @"Souls are refilling. Wait or choose a cheaper demon.";
+    self.primary.accessibilityIdentifier = summoning ? @"campaign.ambush" : nil;
     [self.primary setTitle:action forState:UIControlStateNormal];
-    self.primary.backgroundColor = b.step == 1 && !b.near ? UIColor.systemGrayColor : ember();
-    self.demon.hidden = !(b.step == 5 || (b.step == 0 && (b.level == 0 || b.level == 1)));
+    self.primary.backgroundColor = (!self.primary.enabled || (b.step == 1 && !b.near)) ? UIColor.systemGrayColor : ember();
+    self.demon.hidden = !(b.step == 5 || b.step == 14 || (b.step == 0 && (b.level == 0 || b.level == 1)));
     self.demon.enabled = !b.paused;
     NSString *tool = self.demons[@(b.kind)] ?: @"Choose demon";
+    if (deploying && b.tool == 0)
+        tool = [NSString stringWithFormat:@"Demon · %@",[tool componentsSeparatedByString:@" · "].firstObject];
     if (b.tool == 1) tool = self.doorWait ? [NSString stringWithFormat:@"Door ready in %d s",self.doorWait] : @"Door / lift";
     if (b.tool == 2) tool = self.barrelWait ? [NSString stringWithFormat:@"Barrel ready in %d s",self.barrelWait] : @"Barrel";
     [self.demon setTitle:[tool stringByAppendingString:@"  ▾"] forState:UIControlStateNormal];
@@ -303,6 +327,7 @@ static GameController *active;
         NSString *key = [NSString stringWithFormat:@"bestClear.%d",self.battle.level];
         NSNumber *best = [NSUserDefaults.standardUserDefaults objectForKey:key];
         if (!best || ticks < best.intValue) [NSUserDefaults.standardUserDefaults setInteger:ticks forKey:key];
+        if (!best) [self updateMenus];
     }
     _nextLevel = next; _clearTicks = ticks; _barrelWait = barrel; _doorWait = door; [self refresh];
 }
@@ -330,7 +355,10 @@ void TouchEpisodeStatus(int next,int ticks,int barrelCooldown,int doorCooldown) 
 void TouchAddDemon(int kind,const char *name,int cost) {
     NSString *title = [@(name) capitalizedString];
     if ([title isEqualToString:@"Shotgunguy"]) title = @"Shotgunner";
-    active.demons[@(kind)] = [NSString stringWithFormat:@"%@ · %d souls",title,cost];
+    active.demons[@(kind)] = [NSString stringWithFormat:@"%@ · from %d souls",title,cost];
+}
+void TouchAmbushPrice(int souls) {
+    if (active.ambushPrice != souls) { active.ambushPrice = souls; [active refresh]; }
 }
 void TouchNotice(const char *message) {
     if (![active.notice isEqualToString:@(message)]) { active.notice = @(message); [active refresh]; }

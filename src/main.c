@@ -1859,6 +1859,37 @@ static void MainCleanup(void);
 static void HelldropFrameWeb(void);
 #endif
 
+#ifdef PLATFORM_IOS
+static int quickAmbushLimit = -1;
+static Vector3 ambushMarker;
+static long ambushQuoteTic = -1;
+static MobKind ambushQuoteKind;
+
+// Follow the marine's actual route around corners. Quote the same spot that
+// the button deploys to, including the normal in-sight summon premium.
+static void QuoteAmbush(void)
+{
+    if (ambushQuoteTic >= 0 && sim.tic >= ambushQuoteTic &&
+        sim.tic - ambushQuoteTic < 5 && ambushQuoteKind == selectedKind) return;
+    float ahead = 112.0f;
+    Vector2 pos = sim.dg.pos;
+    for (int i = sim.dg.wpCursor; i < sim.dg.wpCount && ahead > 0; i++) {
+        Vector2 next = sim.dg.wp[i];
+        float distance = Vector2Distance(pos, next);
+        if (distance < 0.01f) continue;
+        pos = Vector2Lerp(pos, next, fminf(ahead / distance, 1.0f));
+        ahead -= distance;
+    }
+    bool valid;
+    float floor = SimFloorAtPoint(&sim, pos.x, pos.y, &valid);
+    if (!valid) { pos = sim.dg.pos; floor = sim.dg.z; }
+    ambushMarker = (Vector3){pos.x, floor + 4.0f, -pos.y};
+    int price = SimDropCost(&sim, selectedKind, pos.x, pos.y, NULL);
+    ambushQuoteTic = sim.tic;
+    ambushQuoteKind = selectedKind;
+    TouchAmbushPrice(price);
+}
+#endif
 static bool webHover;
 static Vector2 webHoverPosition;
 static bool webStarted, webRetry, webTap, webBlast, webModelsReady;
@@ -1942,6 +1973,9 @@ TOUCH_EXPORT void WebAction(int action, int value)
     case WEB_ZOOM: webZoom += value; break;
     case WEB_MUTE: webMute = value; break;
     case WEB_DOOMCAM: webDoomcam = true; break;
+#ifdef PLATFORM_IOS
+    case IOS_AMBUSH: quickAmbushLimit = value; break;
+#endif
     case WEB_INTERRUPT: webInterrupted = true; break;
     }
 }
@@ -2032,9 +2066,18 @@ static bool SwitchWebLevel(int level)
     else snprintf(curMap, sizeof(curMap), "E1M%d", level - 1);
     if (!ReloadLevel(&wad, curMap, &map, &lm, &sim, &thingHeights)) return false;
     webLevel = level;
+#ifdef PLATFORM_IOS
+    quickAmbushLimit = -1;
+    ambushQuoteTic = -1;
+    if (!webAmbush) selectedKind = MK_SHOTGUNGUY;
+#endif
     SetupView(&vs, &map);
     unlocked = 0xFFFFFFFFu;
+#ifdef PLATFORM_IOS
+    doomcamOn = false;
+#else
     doomcamOn = true;
+#endif
     if (webAmbush) ResetAmbush();
     else if (!webModelsRequested) {
         webModelsRequested = true;
@@ -2470,6 +2513,11 @@ static bool HelldropFrame(void)
             gaudio.cursor = 0;
             dropMsgFrames = 0;
 #ifdef HELLDROP_TOUCH
+#ifdef PLATFORM_IOS
+            quickAmbushLimit = -1;
+            ambushQuoteTic = -1;
+            if (!webAmbush) selectedKind = MK_SHOTGUNGUY;
+#endif
             if (webAmbush) ResetAmbush();
             else SetupView(&vs, &map);
             webTool = 0;
@@ -2565,6 +2613,27 @@ static bool HelldropFrame(void)
         Vector2 ground = { 0 };
         bool groundOk = ScreenGroundPoint(&lm, cam, pointer, &ground);
 #ifdef HELLDROP_TOUCH
+#ifdef PLATFORM_IOS
+        if (!webAmbush && !finished && !paused && webTool == 0) {
+            if (quickAmbushLimit >= 0 && ambushQuoteTic >= 0) {
+                // Resolve the displayed marker before updating it for this frame.
+                ground = (Vector2){ambushMarker.x, -ambushMarker.z};
+                int cost = SimDropCost(&sim, selectedKind, ground.x, ground.y, NULL);
+                if (cost <= quickAmbushLimit) {
+                    groundOk = placed = true;
+                } else {
+                    snprintf(dropMsg, sizeof(dropMsg), "Marine spotted the ring. Check the new price.");
+                    dropMsgFrames = 80;
+                }
+                ambushQuoteTic = -1;
+            } else if (placed && !groundOk) {
+                snprintf(dropMsg, sizeof(dropMsg), "Tap a floor or use Ambush.");
+                dropMsgFrames = 80;
+            }
+            QuoteAmbush();
+        }
+        quickAmbushLimit = -1;
+#endif
         if (webAmbush) {
             const TrainingLesson *lesson = &training[webLevel];
             slam = TrainingPlaced() && lesson->door && !trainingDoorUsed && (slam || webTool == 1);
@@ -2647,8 +2716,17 @@ static bool HelldropFrame(void)
             }
         }
         if (!paused && !finished && groundOk && placed) {
+#ifdef PLATFORM_IOS
+            long spentBefore = sim.soulsSpent;
+#endif
             switch (SimTryDrop(&sim, selectedKind, ground.x, ground.y)) {
             case DROP_OK:
+#ifdef PLATFORM_IOS
+                if (!webAmbush) {
+                    snprintf(dropMsg, sizeof(dropMsg), "Demon summoned · %ld souls spent", sim.soulsSpent - spentBefore);
+                    dropMsgFrames = 80;
+                }
+#endif
 #ifdef HELLDROP_TOUCH
                 if (webAmbush) {
                     trainingDrops++;
@@ -2681,6 +2759,9 @@ static bool HelldropFrame(void)
         // rendered frame, so captured footage is smooth and reproducible
         // (per-frame PNG export would otherwise balloon dt).
 #ifdef HELLDROP_TOUCH
+#ifdef PLATFORM_IOS
+        if (!webAmbush && !sim.soulsSpent) dt = 0;
+#endif
         // A stalled phone frame must not fast-forward past a training cue.
         if (webAmbush) dt = fminf(dt, 0.10f);
         if (webAmbush && (trainingCleared || !TrainingPlaced() ||
@@ -2733,6 +2814,9 @@ static bool HelldropFrame(void)
         } else {
             int stage = sim.dg.state == DG_DEAD ? 7 : sim.dg.state == DG_EXITED ? 8
                        : sim.dg.state == DG_NO_GOAL ? 9 : 5;
+#ifdef PLATFORM_IOS
+            if (stage == 5 && !sim.soulsSpent) stage = 14;
+#endif
             int next = -1;
             if (stage == 7) {
                 bool secret = strcmp(curMap, "E1M3") == 0 && sim.dg.sector >= 0 &&
@@ -2750,7 +2834,9 @@ static bool HelldropFrame(void)
         }
 #endif
         bool compactHud = false;
-#ifdef HELLDROP_TOUCH
+#ifdef PLATFORM_IOS
+        compactHud = true;
+#elif defined(PLATFORM_WEB)
         compactHud = GetScreenWidth() < 640;
 #endif
         if (doomcamOn || takeover) {
@@ -2784,6 +2870,12 @@ static bool HelldropFrame(void)
             marine.y += 3;
             DrawCircle3D(marine, 23, (Vector3){ 1, 0, 0 }, 90, SKYBLUE);
         }
+#ifdef PLATFORM_IOS
+        if (!webAmbush && !finished && webTool == 0 && ambushQuoteTic >= 0) {
+            DrawCircle3D(ambushMarker, 30, (Vector3){1, 0, 0}, 90, LIME);
+            DrawCircle3D(ambushMarker, 34, (Vector3){1, 0, 0}, 90, LIME);
+        }
+#endif
         if (webAmbush && !TrainingPlaced()) {
             Vector2 spot = training[webLevel].spots[trainingDrops];
             Vector3 marker = { spot.x, 3, -spot.y };
