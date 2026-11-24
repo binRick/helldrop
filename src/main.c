@@ -1853,7 +1853,7 @@ static void HelldropFrameWeb(void);
 static bool webHover;
 static Vector2 webHoverPosition;
 static bool webStarted, webRetry, webTap, webBlast, webModelsReady;
-static bool webModelsRequested, webPause, webFollow, webDoomcam;
+static bool webModelsRequested, webPause, webInterrupted, webFollow, webDoomcam;
 static int webMute = -1;
 enum {
     TRAIN_BARREL = 0, TRAIN_CHAIN = 1,
@@ -1896,7 +1896,12 @@ static bool TrainingPlaced(void)
 static int ambushBlastDamage, ambushBlastCount;
 
 
-EM_JS(void, WebReady, (int width, int height), { setupGame(width, height); });
+EM_JS(void, WebReady, (void), { setupGame(); });
+EMSCRIPTEN_KEEPALIVE void WebResizeStage(int width, int height)
+{
+    // raylib's web resize callback clamps the viewport to the window maximum.
+    if (width > 0 && height > 0) SetWindowMaxSize(width, height);
+}
 EM_JS(void, WebAddDemon, (int kind, const char *name, int cost), {
     addDemon(kind, UTF8ToString(name), cost);
 });
@@ -1910,7 +1915,7 @@ EM_JS(void, WebEpisodeStatus, (int next, int ticks, int barrelCooldown, int door
 EM_JS(void, WebNotice, (const char *message), { setNotice(UTF8ToString(message)); });
 
 enum { WEB_START, WEB_RETRY, WEB_CONTINUE, WEB_PICK, WEB_TOOL, WEB_BLAST, WEB_MODELS,
-       WEB_PAUSE, WEB_FOLLOW, WEB_ZOOM, WEB_MUTE, WEB_DOOMCAM };
+       WEB_PAUSE, WEB_FOLLOW, WEB_ZOOM, WEB_MUTE, WEB_DOOMCAM, WEB_INTERRUPT };
 EMSCRIPTEN_KEEPALIVE void WebAction(int action, int value)
 {
     switch (action) {
@@ -1926,6 +1931,7 @@ EMSCRIPTEN_KEEPALIVE void WebAction(int action, int value)
     case WEB_ZOOM: webZoom += value; break;
     case WEB_MUTE: webMute = value; break;
     case WEB_DOOMCAM: webDoomcam = true; break;
+    case WEB_INTERRUPT: webInterrupted = true; break;
     }
 }
 
@@ -2303,7 +2309,7 @@ int main(int argc, char **argv)
     ResetAmbush();
     for (int i = 0; i < MK_COUNT; i++)
         WebAddDemon(i, MobKindName((MobKind)i), SimDropBaseCost((MobKind)i));
-    WebReady(GetScreenWidth(), GetScreenHeight());
+    WebReady();
     // requestAnimationFrame-driven (fps=0); simulate_infinite_loop=1 means this
     // never returns and the browser owns the frame cadence.
     emscripten_set_main_loop(HelldropFrameWeb, 0, 1);
@@ -2454,6 +2460,10 @@ static bool HelldropFrame(void)
             simAcc = 0.0;
             memset(mobYawInit, 0, sizeof(mobYawInit));
         }
+#ifdef PLATFORM_WEB
+        if (webInterrupted && !finished) paused = true;
+        webInterrupted = false;
+#endif
         int wantKind = -1;
         bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         if (IsKeyPressed(KEY_ONE))   wantKind = shift ? MK_CHAINGUNNER : MK_ZOMBIE;
@@ -2654,9 +2664,15 @@ static bool HelldropFrame(void)
         // rendered frame, so captured footage is smooth and reproducible
         // (per-frame PNG export would otherwise balloon dt).
 #ifdef PLATFORM_WEB
+        // A stalled phone frame must not fast-forward past a training cue.
+        if (webAmbush) dt = fminf(dt, 0.10f);
         if (webAmbush && (trainingCleared || !TrainingPlaced() ||
                           (training[webLevel].door && !trainingDoorUsed))) dt = 0;
-        if (webAmbush && AmbushNearBarrel()) dt *= 0.4f;
+        if (webAmbush && AmbushNearBarrel()) {
+            // The first barrel lesson gives the player time to find the button.
+            // Chain Reaction and the Gauntlet still require a timed detonation.
+            dt *= webLevel == TRAIN_BARREL ? 0.0f : 0.4f;
+        }
 #endif
         if (!paused) simAcc += opt.dumpDir ? SIM_TICTIME * (double)opt.turbo
                               : (double)dt * (double)opt.turbo;

@@ -92,9 +92,9 @@ try {
     if (result.exceptionDetails) throw new Error(JSON.stringify(result.exceptionDetails));
     return result.result.value;
   }
-  async function wait(expression) {
+  async function wait(expression, timeout = 30000) {
     try {
-      return await until(() => evaluate(expression), 'Timed out waiting for ' + expression);
+      return await until(() => evaluate(expression), 'Timed out waiting for ' + expression, timeout);
     } catch (error) {
       const state = await evaluate("typeof currentLevel === 'undefined' ? null : {currentLevel, step, stats: stats.textContent, notice: notice.textContent, mute: mute.textContent, savedMute: localStorage.getItem('helldrop.muted')}");
       throw new Error(error.message + ' ' + JSON.stringify(state) + ' ' + JSON.stringify(errors));
@@ -166,9 +166,15 @@ try {
   await call('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
   await call('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
   await call('Page.navigate', { url });
-  await wait("document.querySelector('#start:enabled')");
+  await wait("document.querySelector('#start:enabled')", 90000);
   await button('#start');
   await wait("currentLevel === 11 && step === 0 && instruction.textContent.includes('green ring')");
+  assert.ok(await evaluate('continueButton.hidden'), 'Opening lesson should have one next action');
+  for (const [width, height] of [[375, 550], [667, 300], [390, 844]]) {
+    await call('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: true });
+    await wait('canvas.width === stage.clientWidth && canvas.height === stage.clientHeight');
+    assert.ok(await evaluate('stage.clientWidth >= 300 && stage.clientHeight >= 220'));
+  }
   await tap(await trainingSpot(720, 460, 128));
   await wait("step === 3 && instruction.textContent.startsWith('Good job!')");
   assert.equal(await evaluate("continueButton.parentElement.id"), 'lesson-action');
@@ -185,9 +191,18 @@ try {
   await wait("mute.textContent === 'Unmute' && localStorage.getItem('helldrop.muted') === 'true'");
   await button('#mute');
   await wait("mute.textContent === 'Mute' && localStorage.getItem('helldrop.muted') === 'false'");
+  async function interrupt() {
+    // Exercise duplicate lifecycle notifications without suspending the test renderer.
+    await evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }))");
+    await wait("pauseButton.textContent === 'Resume'");
+  }
+  await interrupt();
+  await button('#pause');
+  await wait("pauseButton.textContent === 'Pause'");
   await button('#pause');
   await wait("pauseButton.textContent === 'Resume'");
-  await tap(await canvasPoint(0.62, 0.54));
+  await interrupt();
+  await tap(await trainingSpot(640, 370, 154));
   assert.equal(await evaluate('step'), 0, 'Paused game accepted a drop');
   await button('#pause');
   await wait("pauseButton.textContent === 'Pause'");
@@ -195,8 +210,10 @@ try {
   await button('#shotgunner');
   await wait("shotgunner.getAttribute('aria-pressed') === 'true'");
   await button('#imp');
-  await tap(await canvasPoint(0.62, 0.54));
+  await tap(await trainingSpot(640, 370, 154));
   await wait("barrel.classList.contains('now')");
+  await delay(2200);
+  assert.ok(await evaluate("barrel.classList.contains('now')"), 'First barrel cue expired while reading');
   await button('#blast');
   await wait('step === 3');
   await wait('testAudioPeak > 0.1');
@@ -206,7 +223,7 @@ try {
 
   await button('#continue');
   await wait('currentLevel === 1 && step === 0');
-  await tap(await canvasPoint(0.62, 0.54));
+  await tap(await trainingSpot(720, 370, 154));
   await wait("barrel.classList.contains('now')");
   await button('#blast');
   await wait('step === 3');
@@ -275,7 +292,7 @@ try {
     await call('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', clickCount: 1, x, y });
   }
   await call('Page.reload');
-  await wait("document.querySelector('#start:enabled')");
+  await wait("document.querySelector('#start:enabled')", 90000);
   await click(await elementCenter('#start'));
   await wait("currentLevel === 11 && step === 0 && instruction.textContent.includes('green ring')");
   await click(await trainingSpot(720, 460, 128));
