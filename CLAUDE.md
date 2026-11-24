@@ -22,6 +22,14 @@ Full design rationale and roadmap: `DESIGN.md`.
   ximg-web's `helldrop-html/game/`, then follow its release procedure in
   `CLAUDE.md` under *WebAssembly Apps → Helldrop*. The live build at
   helldrop.ximg.app updates through that release process.
+- **iOS App Store release** (bundle `app.ximg.helldrop`): the version and
+  build number live in `ios/project.yml` (`MARKETING_VERSION`,
+  `CURRENT_PROJECT_VERSION`; bump the build for every upload).
+  `scripts/ios-appstore.sh` archives, exports and uploads;
+  `scripts/asc-submit.py <version> <build>` attaches the build and submits
+  (or resubmits a rejected version; `ASC_REVIEW_NOTES_FILE` replaces the
+  review notes). The iPhone build skins models on the CPU, like the web
+  build: GPU skinning under OpenGL ES 3 stretches vertices into spikes.
 - Builds `Helldrop.app` (minimal bundle: Info.plist + icon.icns from
   `assets/icon.png`) so cmd+tab shows the game icon; run.sh execs the binary
   inside it. The window spawns at the monitor's left edge (user preference —
