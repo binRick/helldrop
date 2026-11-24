@@ -112,7 +112,7 @@ place a demon. The level name opens the map picker, and the options menu
 contains Retry, Mute, and episode camera controls. Drag to pan and pinch to
 zoom in Episode 1. The app remembers cleared lessons, best scores, and the last
 map. Returning from Home pauses the run. To run the native touch regression,
-select an iPhone simulator in Xcode and use Product → Test.
+select an iPhone simulator in Xcode and use Product → Test. See the [iPhone playtest record](ios/PLAYTEST.md) for physical-device results and the next-run checklist.
 
 **Browser build.** Run `make web-serve` with Emscripten on your PATH and
 open `http://localhost:8000`. Seven short lessons build from one summon to
