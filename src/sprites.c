@@ -73,7 +73,7 @@ static const char *PICKUP_LUMPS[PK_COUNT] = {
 // Same alpha-test discard shader, two dialects: desktop GL 3.3 core, and
 // GLSL ES 3.00 for WebGL 2 (PLATFORM_WEB) — which additionally requires an
 // explicit float precision qualifier. Bodies are otherwise identical.
-#ifdef PLATFORM_WEB
+#if defined(GRAPHICS_API_OPENGL_ES3)
 static const char *ALPHA_TEST_FS =
     "#version 300 es\n"
     "precision mediump float;\n"

@@ -23,8 +23,15 @@
 #define KIT_BACKGROUND_IMPLEMENTATION
 #include "kit_background.h"
 
+#if defined(PLATFORM_WEB) || defined(PLATFORM_IOS)
+#define HELLDROP_TOUCH
+#include "touch_host.h"
+#endif
 #ifdef PLATFORM_WEB
 #include <emscripten/emscripten.h>
+#define TOUCH_EXPORT EMSCRIPTEN_KEEPALIVE
+#else
+#define TOUCH_EXPORT
 #endif
 
 #define HELLDROP_VERSION "0.1.0"
@@ -66,7 +73,7 @@ static Vector3 MobRenderPos(const Mob *m, float alpha);
 // ---- Dynamic lights: fireballs, rockets, blasts and muzzle flashes light
 // the level and the models around them (render-only, from sim state).
 #define MAX_LIGHTS 24
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
 #define LVL_GLSL "#version 300 es\nprecision highp float;\n"
 #else
 #define LVL_GLSL "#version 330\n"
@@ -1847,8 +1854,10 @@ static char curMap[9];
 static bool HelldropFrame(void);   // one game-loop iteration (false => stop)
 static void AutodropTick(Sim *simp);
 static void MainCleanup(void);
+#ifdef HELLDROP_TOUCH
 #ifdef PLATFORM_WEB
 static void HelldropFrameWeb(void);
+#endif
 
 static bool webHover;
 static Vector2 webHoverPosition;
@@ -1896,27 +1905,29 @@ static bool TrainingPlaced(void)
 static int ambushBlastDamage, ambushBlastCount;
 
 
+#ifdef PLATFORM_WEB
 EM_JS(void, WebReady, (void), { setupGame(); });
-EMSCRIPTEN_KEEPALIVE void WebResizeStage(int width, int height)
+TOUCH_EXPORT void WebResizeStage(int width, int height)
 {
     // raylib's web resize callback clamps the viewport to the window maximum.
     if (width > 0 && height > 0) SetWindowMaxSize(width, height);
 }
-EM_JS(void, WebAddDemon, (int kind, const char *name, int cost), {
+EM_JS(void, TouchAddDemon, (int kind, const char *name, int cost), {
     addDemon(kind, UTF8ToString(name), cost);
 });
-EM_JS(void, WebStatus, (int stage, int kind, int souls, int health, int near, int mode, int blastDamage, int level, int stopped, int chain), {
+EM_JS(void, TouchStatus, (int stage, int kind, int souls, int health, int near, int mode, int blastDamage, int level, int stopped, int chain), {
     updateGame(stage, kind, souls, health, near, mode, blastDamage, level, stopped, chain);
 });
 EM_JS(void, WebLoadModels, (void), { loadModels(); });
-EM_JS(void, WebEpisodeStatus, (int next, int ticks, int barrelCooldown, int doorCooldown), {
+EM_JS(void, TouchEpisodeStatus, (int next, int ticks, int barrelCooldown, int doorCooldown), {
     updateEpisode(next, ticks, barrelCooldown, doorCooldown);
 });
-EM_JS(void, WebNotice, (const char *message), { setNotice(UTF8ToString(message)); });
+EM_JS(void, TouchNotice, (const char *message), { setNotice(UTF8ToString(message)); });
 
-enum { WEB_START, WEB_RETRY, WEB_CONTINUE, WEB_PICK, WEB_TOOL, WEB_BLAST, WEB_MODELS,
-       WEB_PAUSE, WEB_FOLLOW, WEB_ZOOM, WEB_MUTE, WEB_DOOMCAM, WEB_INTERRUPT };
-EMSCRIPTEN_KEEPALIVE void WebAction(int action, int value)
+#else
+static void WebLoadModels(void) { webModelsReady = true; }
+#endif
+TOUCH_EXPORT void WebAction(int action, int value)
 {
     switch (action) {
     case WEB_START: webStarted = true; break;
@@ -1935,19 +1946,19 @@ EMSCRIPTEN_KEEPALIVE void WebAction(int action, int value)
     }
 }
 
-EMSCRIPTEN_KEEPALIVE void WebTap(float x, float y)
+TOUCH_EXPORT void WebTap(float x, float y)
 {
     webTap = true;
     webTapPosition = (Vector2){ x, y };
 }
 
-EMSCRIPTEN_KEEPALIVE void WebHover(float x, float y, int visible)
+TOUCH_EXPORT void WebHover(float x, float y, int visible)
 {
     webHover = visible;
     webHoverPosition = (Vector2){ x, y };
 }
 
-EMSCRIPTEN_KEEPALIVE void WebPan(float x, float y)
+TOUCH_EXPORT void WebPan(float x, float y)
 {
     webPan.x += x;
     webPan.y += y;
@@ -2046,14 +2057,18 @@ static bool SwitchWebLevel(int level)
 
 #endif
 
+#ifdef PLATFORM_IOS
+int HelldropIOSStart(int argc, char **argv)
+#else
 int main(int argc, char **argv)
+#endif
 {
     if (!ParseArgs(argc, argv, &opt)) {
         PrintUsage(stderr);
         return 2;
     }
 
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
     // Start with the authored ambush before offering the full E1M1 demo.
     // Browser sessions have no writable working directory for debug logs.
     opt.mapName = training[webLevel].map;
@@ -2092,7 +2107,7 @@ int main(int argc, char **argv)
                                     argc, argv));
     InitWindow(opt.winW, opt.winH, "HELLDROP");
     kit_background_apply();   // hidden runs leave the Dock before any loading
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
     // requestAnimationFrame drives cadence on web; calling SetTargetFPS would
     // make raylib's EndDrawing() block in WaitTime()->emscripten_sleep, which
     // needs ASYNCIFY (which we deliberately avoid). ESC must also not trip the
@@ -2211,7 +2226,7 @@ int main(int argc, char **argv)
     if (!GameSpritesLoad(&gsprites, &wad)) {
         TraceLog(LOG_WARNING, "MAIN: no sprites in WAD, using shape renderer");
     }
-#ifndef PLATFORM_WEB
+#ifndef HELLDROP_TOUCH
     {
         const char *mdir = getenv("HELLDROP_MODEL_DIR");
         if (GameModelsLoad(&gmodels, mdir ? mdir : "assets/models")) {
@@ -2255,7 +2270,7 @@ int main(int argc, char **argv)
             EndMode3D();
             if (!opt.dumpVideo) DrawText(TextFormat("--viewer  clip: %s", CLIPN[clip]), 12, 12, 24, RAYWHITE);
             EndDrawing();
-#ifndef PLATFORM_WEB
+#ifndef HELLDROP_TOUCH
             if (opt.dumpVideo) {
                 static FILE *vp;
                 Image shot = LoadImageFromScreen();
@@ -2304,15 +2319,17 @@ int main(int argc, char **argv)
     if (!(unlocked & (1u << selectedKind))) selectedKind = MK_ZOMBIE;
     SetWindowTitle(TextFormat("HELLDROP - %s", curMap));
 
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
     howtoFrames = 0;
     ResetAmbush();
     for (int i = 0; i < MK_COUNT; i++)
-        WebAddDemon(i, MobKindName((MobKind)i), SimDropBaseCost((MobKind)i));
+        TouchAddDemon(i, MobKindName((MobKind)i), SimDropBaseCost((MobKind)i));
+#ifdef PLATFORM_WEB
     WebReady();
     // requestAnimationFrame-driven (fps=0); simulate_infinite_loop=1 means this
     // never returns and the browser owns the frame cadence.
     emscripten_set_main_loop(HelldropFrameWeb, 0, 1);
+#endif
 #else
     while (!WindowShouldClose())
         if (!HelldropFrame()) break;
@@ -2368,7 +2385,7 @@ static bool HelldropFrame(void)
         frameWorkStart = GetTime();
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         bool retry = webRetry;
         bool togglePause = webPause;
 #else
@@ -2379,13 +2396,13 @@ static bool HelldropFrame(void)
         bool slam = IsKeyPressed(KEY_F);
         bool blast = IsKeyPressed(KEY_V);
         bool toggleDoomcam = IsKeyPressed(KEY_C);
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         int muteRequest = -1;
 #else
         int muteRequest = IsKeyPressed(KEY_U) ? !muted : -1;
 #endif
         Vector2 pointer = GetMousePosition();
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (!webStarted) return true;
         if (webLevelRequest >= 0) {
             if (!SwitchWebLevel(webLevelRequest)) return false;
@@ -2436,14 +2453,14 @@ static bool HelldropFrame(void)
         }
         bool finished = sim.dg.state == DG_DEAD || sim.dg.state == DG_EXITED ||
                         sim.dg.state == DG_NO_GOAL;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         finished |= webAmbush && trainingCleared;
 #endif
         if (togglePause && !finished) paused = !paused;
         if (retry) {
             paused = finished = false;
             LogInput("sim_restart");
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
             if (!webAmbush) MeltStart(&melt);
 #else
             MeltStart(&melt);
@@ -2452,7 +2469,7 @@ static bool HelldropFrame(void)
             if (!SimInit(&sim, &map, &lm)) return false;
             gaudio.cursor = 0;
             dropMsgFrames = 0;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
             if (webAmbush) ResetAmbush();
             else SetupView(&vs, &map);
             webTool = 0;
@@ -2460,7 +2477,7 @@ static bool HelldropFrame(void)
             simAcc = 0.0;
             memset(mobYawInit, 0, sizeof(mobYawInit));
         }
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webInterrupted && !finished) paused = true;
         webInterrupted = false;
 #endif
@@ -2476,14 +2493,14 @@ static bool HelldropFrame(void)
         if (IsKeyPressed(KEY_EIGHT)) wantKind = MK_BARON;
         if (IsKeyPressed(KEY_NINE))  wantKind = MK_ARCHVILE;
         if (IsKeyPressed(KEY_ZERO))  wantKind = MK_SPECTRE;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webPick >= 0) wantKind = webPick;
         webPick = -1;
 #endif
         if (wantKind >= 0 && wantKind < MK_COUNT) {
             if (unlocked & (1u << wantKind)) {
                 selectedKind = (MobKind)wantKind;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
                 webTool = 0;
 #endif
             } else {
@@ -2547,7 +2564,7 @@ static bool HelldropFrame(void)
         Camera3D cam = CameraFromView(&vs);
         Vector2 ground = { 0 };
         bool groundOk = ScreenGroundPoint(&lm, cam, pointer, &ground);
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webAmbush) {
             const TrainingLesson *lesson = &training[webLevel];
             slam = TrainingPlaced() && lesson->door && !trainingDoorUsed && (slam || webTool == 1);
@@ -2582,7 +2599,7 @@ static bool HelldropFrame(void)
             int cost = 0;
             switch (SimSlamMover(&sim, ground.x, ground.y, &cost)) {
             case VERB_OK:
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
                 if (webAmbush) trainingDoorUsed = true;
 #endif
                 break;
@@ -2601,13 +2618,13 @@ static bool HelldropFrame(void)
             }
         }
         if (!paused && !finished && groundOk && blast) {
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
             long damageBefore = sim.dgDamageTaken;
             int blastsBefore = sim.boomHead;
 #endif
             switch (SimDetonateBarrel(&sim, ground.x, ground.y)) {
             case VERB_OK:
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
                 if (webAmbush) {
                     ambushBlastDamage = sim.dgDamageTaken - damageBefore;
                     ambushBlastCount = sim.boomHead - blastsBefore;
@@ -2632,7 +2649,7 @@ static bool HelldropFrame(void)
         if (!paused && !finished && groundOk && placed) {
             switch (SimTryDrop(&sim, selectedKind, ground.x, ground.y)) {
             case DROP_OK:
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
                 if (webAmbush) {
                     trainingDrops++;
                     if (webLevel == TRAIN_CROSSFIRE && !TrainingPlaced()) {
@@ -2663,7 +2680,7 @@ static bool HelldropFrame(void)
         // we ignore wall time entirely and advance exactly `turbo` tics per
         // rendered frame, so captured footage is smooth and reproducible
         // (per-frame PNG export would otherwise balloon dt).
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         // A stalled phone frame must not fast-forward past a training cue.
         if (webAmbush) dt = fminf(dt, 0.10f);
         if (webAmbush && (trainingCleared || !TrainingPlaced() ||
@@ -2692,7 +2709,7 @@ static bool HelldropFrame(void)
         // fullscreen for the death takeover).
         long deathAge = (sim.dg.state == DG_DEAD) ? (sim.tic - sim.dg.deathTic) : -1;
         bool takeover = (deathAge >= 0 && deathAge < 140);
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webAmbush) {
             takeover = false;
             bool ready = sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED &&
@@ -2711,7 +2728,7 @@ static bool HelldropFrame(void)
                        : !TrainingPlaced() ? (trainingDrops ? 13 : 0)
                        : training[webLevel].door && !trainingDoorUsed ? 12
                        : sim.barrelCount == 0 ? 10 : sim.barrels[0].alive ? 1 : 2;
-            WebStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, ready,
+            TouchStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, ready,
                       webTool, ambushBlastDamage, webLevel, paused, ambushBlastCount);
         } else {
             int stage = sim.dg.state == DG_DEAD ? 7 : sim.dg.state == DG_EXITED ? 8
@@ -2723,17 +2740,17 @@ static bool HelldropFrame(void)
                 const char *mapName = NextCampaignMap(curMap, secret);
                 if (mapName) next = mapName[3] - '0' + 1;
             }
-            WebStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, 0, webTool,
+            TouchStatus(stage, selectedKind, (int)sim.souls, sim.dg.health, 0, webTool,
                       -1, webLevel, paused, 0);
             long barrelTics = sim.verbReadyTic[VERB_BARREL] - sim.tic;
             long doorTics = sim.verbReadyTic[VERB_DOOR] - sim.tic;
-            WebEpisodeStatus(next, stage == 7 ? (int)sim.dg.finishTic : -1,
+            TouchEpisodeStatus(next, stage == 7 ? (int)sim.dg.finishTic : -1,
                              barrelTics > 0 ? (int)((barrelTics + SIM_TICRATE - 1)/SIM_TICRATE) : 0,
                              doorTics > 0 ? (int)((doorTics + SIM_TICRATE - 1)/SIM_TICRATE) : 0);
         }
 #endif
         bool compactHud = false;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         compactHud = GetScreenWidth() < 640;
 #endif
         if (doomcamOn || takeover) {
@@ -2761,7 +2778,7 @@ static bool HelldropFrame(void)
             DrawCircle3D((Vector3){ boom->pos.x, boom->z - 17.0f, -boom->pos.y },
                          22.0f + 8.0f*age, (Vector3){ 1, 0, 0 }, 90, ember);
         }
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webAmbush && sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED) {
             Vector3 marine = DgRenderPos(&sim, simAlpha);
             marine.y += 3;
@@ -2794,7 +2811,7 @@ static bool HelldropFrame(void)
         int cursorCost = 0;
         bool cursorAfford = false;
         bool showDropCursor = groundOk;
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         showDropCursor &= webHover && webTool == 0 && (!webAmbush || !TrainingPlaced());
 #endif
         if (showDropCursor) {
@@ -2835,7 +2852,7 @@ static bool HelldropFrame(void)
             DrawRectangleLines(px - 1, py - 1, width + 2, height + 2, (Color){ 90, 90, 96, 255 });
             DrawTextShadowed("DOOMCAM", px + 6, py + 4, 14, (Color){ 200, 60, 50, 255 });
         }
-#ifdef PLATFORM_WEB
+#ifdef HELLDROP_TOUCH
         if (webAmbush && sim.dg.state != DG_DEAD && sim.dg.state != DG_EXITED) {
             Vector3 marine = DgRenderPos(&sim, simAlpha);
             marine.y += 60.0f;
@@ -2885,12 +2902,12 @@ static bool HelldropFrame(void)
             if (x + quoteWidth >= GetScreenWidth()) x = (int)mp.x - quoteWidth - 8;
             DrawTextShadowed(quote, x, (int)mp.y - 6, 18, tcol);
         }
-#ifdef PLATFORM_WEB
-        WebNotice(dropMsgFrames > 0 ? dropMsg : "");
+#ifdef HELLDROP_TOUCH
+        TouchNotice(dropMsgFrames > 0 ? dropMsg : "");
 #endif
         if (dropMsgFrames > 0) {
             dropMsgFrames--;
-#ifndef PLATFORM_WEB
+#ifndef HELLDROP_TOUCH
             int w = MeasureText(dropMsg, 24);
             DrawTextShadowed(dropMsg, GetScreenWidth()/2 - w/2,
                              GetScreenHeight() - 110, 24,
@@ -2899,7 +2916,7 @@ static bool HelldropFrame(void)
         }
         if (paused) {
             const char *label = "PAUSED";
-#ifndef PLATFORM_WEB
+#ifndef HELLDROP_TOUCH
             label = "PAUSED  |  P TO RESUME";
 #endif
             DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){ 0, 0, 0, 120 });
@@ -2910,7 +2927,7 @@ static bool HelldropFrame(void)
         frameWorkMs = (GetTime() - frameWorkStart)*1000.0;
         EndDrawing();
 
-#ifndef PLATFORM_WEB
+#ifndef HELLDROP_TOUCH
         if (opt.dumpVideo) {
             static FILE *pipe;
             Image shot = LoadImageFromScreen();
@@ -3000,7 +3017,14 @@ static void MainCleanup(void)
     CloseWindow();
 }
 
-#ifdef PLATFORM_WEB
+#ifdef PLATFORM_IOS
+bool HelldropIOSFrame(void)
+{
+    if (HelldropFrame()) return true;
+    MainCleanup();
+    return false;
+}
+#elif defined(PLATFORM_WEB)
 static void HelldropFrameWeb(void)
 {
     // No native window-close button on web; in practice HelldropFrame never

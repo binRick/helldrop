@@ -10,3 +10,5 @@ assets/*.wad
 assets/*.WAD
 tools/mkwad
 build/
+
+ios/Helldrop.xcodeproj/

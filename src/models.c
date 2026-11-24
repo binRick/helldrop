@@ -15,7 +15,7 @@ void UpdateModelAnimationBones(Model model, ModelAnimation anim, float frame);
 #define MAX_BONES 100
 #define CLIP_FPS 60.0f   // raylib resamples glTF clips at 60 fps
 
-#ifdef PLATFORM_WEB
+#if defined(GRAPHICS_API_OPENGL_ES3)
 #define GLSL_HEAD "#version 300 es\nprecision highp float;\n"
 #else
 #define GLSL_HEAD "#version 330\n"

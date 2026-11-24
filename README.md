@@ -104,6 +104,16 @@ cd helldrop
 `run.sh` does an incremental `make` and launches the game attached to your
 terminal. No Homebrew dependencies — raylib is vendored and statically linked.
 
+**Native iPhone app.** With Xcode and XcodeGen installed, run `make ios-project` and open
+`ios/Helldrop.xcodeproj`. Select your signing team, choose the iPhone as the run
+destination, and run the Helldrop scheme. The arm64 app bundles the training
+maps, Episode 1, sounds, and models for offline play. Tap the battlefield to
+place a demon. The level name opens the map picker, and the options menu
+contains Retry, Mute, and episode camera controls. Drag to pan and pinch to
+zoom in Episode 1. The app remembers cleared lessons, best scores, and the last
+map. Returning from Home pauses the run. To run the native touch regression,
+select an iPhone simulator in Xcode and use Product → Test.
+
 **Browser build.** Run `make web-serve` with Emscripten on your PATH and
 open `http://localhost:8000`. Seven short lessons build from one summon to
 a two-demon ambush using a door, chain blast, and a race to the medkit.

@@ -218,3 +218,12 @@ test-web: web
 	node tools/web_playtest.mjs
 
 .PHONY: game clean distclean bake-hud web web-raylib web-serve web-clean test test-web
+
+# The native and browser targets share this WAD's training maps and Episode 1.
+build/ios-%/libraylib.a: ios/build-raylib.sh ios/rcore_ios.c ios/raylib_ios_glcompat.h | $(RAYLIB_SRC)
+	ios/build-raylib.sh $*
+
+ios-project: $(WEB_WAD) | $(RAYLIB_SRC)
+	xcodegen generate --spec ios/project.yml
+
+.PHONY: ios-project
