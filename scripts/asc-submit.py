@@ -292,13 +292,26 @@ def submit_for_review(token, app_id, version_id):
     if rejected:
         rs_id = rejected[0]["id"]
         print(f"  resubmitting rejected reviewSubmission {rs_id}")
-        req(
-            "PATCH",
-            f"/v1/reviewSubmissions/{rs_id}",
-            token=token,
-            body={"data": {"type": "reviewSubmissions", "id": rs_id,
-                           "attributes": {"submitted": True}}},
-        )
+        try:
+            req(
+                "PATCH",
+                f"/v1/reviewSubmissions/{rs_id}",
+                token=token,
+                body={"data": {"type": "reviewSubmissions", "id": rs_id,
+                               "attributes": {"submitted": True}}},
+            )
+        except urllib.error.HTTPError as e:
+            if e.code != 409:
+                raise
+            # Seen 2026-11-24: after a rejection the API answers "Version is not
+            # ready to be submitted yet" however long you wait. The build and
+            # the notes above are saved; the last step exists only in the web UI.
+            sys.exit(
+                "\nThe build and notes are saved, but Apple's API will not resubmit a rejected version.\n"
+                "Finish in App Store Connect: open the version page, click 'Update Review',\n"
+                "then 'Resubmit to App Review' on the submission page:\n"
+                f"  https://appstoreconnect.apple.com/apps/{app_id}/distribution/ios/version/inflight"
+            )
         print("  RESUBMITTED for review")
         return
     open_rs = req(

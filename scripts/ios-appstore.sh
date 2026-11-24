@@ -55,7 +55,7 @@ xcodebuild archive \
     -archivePath "$ARCHIVE_PATH" -allowProvisioningUpdates \
     ${AUTH[@]+"${AUTH[@]}"} \
     DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
-    | grep -E "error:|warning: .*[Ss]ign|ARCHIVE (SUCCEEDED|FAILED)" || true
+    | grep -E "error:|warning: .*([Cc]ode ?[Ss]ign|[Pp]rovisioning)|ARCHIVE (SUCCEEDED|FAILED)" || true
 [[ -d "$ARCHIVE_PATH" ]] || { echo "ERROR: no archive at $ARCHIVE_PATH" >&2; exit 1; }
 
 echo "==> Exporting App Store IPA"
