@@ -121,6 +121,19 @@ Full design rationale and roadmap: `DESIGN.md`.
   spawning; hidden drops are instant. `SimDrop` is the free dev spawn,
   `SimTryDrop` the player path.
 
+## Play stats
+
+`src/playstats.c` (shared with the other ximg.app games) sends anonymous play
+sessions to `https://ximg.app/api/play/`: game, version, platform, a random
+install id, and play time (a beat every 60 s and at exit). The server adds a
+country from the IP and does not keep the IP. Dashboard (owner only):
+https://stats.ximg.app/games/. Hidden runs (`--selftest`, `--simonly`,
+`--exit-after`, `--dump-*`) and `--viewer` never send; `PLAYSTATS_OFF=1`
+turns it off anywhere. The App Store privacy label and `ios/PrivacyInfo.xcprivacy`
+declare Product Interaction + Coarse Location, not linked, not tracking — keep
+them in step if what is sent ever changes. Keep `HELLDROP_VERSION` equal to
+`MARKETING_VERSION` in `ios/project.yml`.
+
 ## Gamestate log (the debugging contract)
 
 Every run appends NDJSON to `logs/run-<timestamp>.ndjson`

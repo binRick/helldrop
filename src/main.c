@@ -19,6 +19,7 @@
 #include "sprites.h"
 #include "sound.h"
 #include "statelog.h"
+#include "playstats.h"
 #include "models.h"
 #define KIT_BACKGROUND_IMPLEMENTATION
 #include "kit_background.h"
@@ -34,7 +35,7 @@
 #define TOUCH_EXPORT
 #endif
 
-#define HELLDROP_VERSION "0.1.0"
+#define HELLDROP_VERSION "1.0.1"   // keep in step with ios/project.yml MARKETING_VERSION
 
 #define CAM_DIST   4000.0f   // keeps the ortho camera outside all geometry
 #define YAW_HOME     45.0f
@@ -2150,6 +2151,9 @@ int main(int argc, char **argv)
                                     argc, argv));
     InitWindow(opt.winW, opt.winH, "HELLDROP");
     kit_background_apply();   // hidden runs leave the Dock before any loading
+    // Anonymous play stats (sessions, play time; see playstats.h). Never from
+    // hidden test/capture runs or the model viewer.
+    if (!kit_in_background() && !opt.viewer && !opt.dumpVideo) PlayStatsInit("helldrop", HELLDROP_VERSION, ".");
 #ifdef HELLDROP_TOUCH
     // requestAnimationFrame drives cadence on web; calling SetTargetFPS would
     // make raylib's EndDrawing() block in WaitTime()->emscripten_sleep, which
@@ -2428,6 +2432,7 @@ static bool HelldropFrame(void)
         frameWorkStart = GetTime();
         StateLogSetFrame(frame);
         float dt = GetFrameTime();
+        PlayStatsUpdate(dt);
 #ifdef HELLDROP_TOUCH
         bool retry = webRetry;
         bool togglePause = webPause;
@@ -3092,6 +3097,7 @@ static bool HelldropFrame(void)
 static void MainCleanup(void)
 {
     LogShutdown(frame, sim.tic);
+    PlayStatsShutdown();
     StateLogClose();
     if (melt.tex.id != 0) UnloadTexture(melt.tex);
     UnloadRenderTexture(doomcamRT);
